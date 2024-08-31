@@ -3,6 +3,7 @@ import os
 import dlib
 
 from parsing_data import get_images_data
+from argument_parser import ArgumentParser
 from face_operations import detect_faces, face_align
 from configuration import FDDB_IMAGE_DATASET, FDDB_DATASET_FILE_NAME, UNPACKED_DATA_DIR, FACE_DETECTION_MODEL_NAME, SHAPE_PREDICTOR_NAME
 
@@ -10,6 +11,9 @@ from transformers import DetrForObjectDetection, DetrImageProcessor
 
 
 if __name__ == "__main__":
+    parser = ArgumentParser()
+    arguments = parser.parse()
+
     parsed_images = get_images_data(os.path.join(UNPACKED_DATA_DIR, FDDB_IMAGE_DATASET, FDDB_DATASET_FILE_NAME.format("01")))
     model = DetrForObjectDetection.from_pretrained(FACE_DETECTION_MODEL_NAME)
     processor = DetrImageProcessor.from_pretrained(FACE_DETECTION_MODEL_NAME)
@@ -19,7 +23,7 @@ if __name__ == "__main__":
     for image in parsed_images:
         if not os.path.exists(image.get("path_to_image")):
             continue
-        if num_images >= 3:
+        if num_images >= int(arguments.num_pictures_to_process):
             break
         num_images += 1
         found_faces.extend(detect_faces(image.get("path_to_image"), model, processor))

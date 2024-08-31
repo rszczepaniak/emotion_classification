@@ -17,4 +17,6 @@ Execute following command:
 - `pip3 install -r requirements.txt`
 
 # Running face detection pipeline:
-- `python3 src/main.py`
+- `python3 src/main.py --num-pictures-to-process N`
+
+where `N` is number of pictures from which to extract faces
