@@ -1,0 +1,3 @@
+[submodule "face-frontalization"]
+	path = face-frontalization
+	url = git@github.com:dougsouza/face-frontalization.git

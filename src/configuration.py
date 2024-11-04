@@ -1,6 +1,8 @@
 PACKED_DATA_DIR = "data"
 UNPACKED_DATA_DIR = "data_unpacked"
+IMAGES_DIR = "images"
 SHAPE_PREDICTOR_NAME = "shape_predictor_68_face_landmarks.dat"
 FACE_DETECTION_MODEL_NAME = "diffusionai/detr-face-detection"
 FDDB_IMAGE_DATASET = "FDDB-folds"
 FDDB_DATASET_FILE_NAME = "FDDB-fold-{}-ellipseList.txt"
+DATE_FORMAT = "%Y-%m-%d-%H-%M-%S"
