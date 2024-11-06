@@ -2,9 +2,9 @@ import os
 
 import cv2
 import dlib
+import numpy as np
 import torch
 from PIL import Image
-import numpy as np
 
 
 def same_detection(current_box, found_boxes):
@@ -14,7 +14,7 @@ def same_detection(current_box, found_boxes):
     return False
 
 
-def detect_faces(image_path, model, processor, threshold=0.9):
+def detect_faces(image_path, model, processor, threshold=0.9, padding=10):
     """
     Detect faces in an image using the MTCNN model from Hugging Face and return a list of cropped face images.
 
@@ -23,6 +23,7 @@ def detect_faces(image_path, model, processor, threshold=0.9):
         model: Pre-trained MTCNN model.
         processor: Pre-trained MTCNN processor.
         threshold (float): Confidence threshold for face detection.
+        padding (int): Padding size for face detection.
 
     Returns:
         List[Image]: List of cropped images containing only the detected faces.
@@ -53,10 +54,14 @@ def detect_faces(image_path, model, processor, threshold=0.9):
             found_faces.append(box.tolist())
             # Convert box coordinates to integers
             box = [int(coord) for coord in box.tolist()]
+            x_min, y_min, x_max, y_max = box
 
-            # Crop the face from the image
-            face_image = image.crop((box[0], box[1], box[2], box[3]))
+            x_min_padded = max(x_min - padding, 0)
+            y_min_padded = max(y_min - padding, 0)
+            x_max_padded = min(x_max + padding, image.width)
+            y_max_padded = min(y_max + padding, image.height)
 
+            face_image = image.crop((x_min_padded, y_min_padded, x_max_padded, y_max_padded))
             face_images.append(face_image)
             print(
                 f"Detected face with confidence "
@@ -102,7 +107,8 @@ def face_align(pil_image, predictor):
     M = cv2.getRotationMatrix2D(eye_center, angle, scale=1)
 
     # Rotate the image
-    rotated_cv_image = cv2.warpAffine(open_cv_image, M, (open_cv_image.shape[1], open_cv_image.shape[0]), flags=cv2.INTER_CUBIC)
+    rotated_cv_image = cv2.warpAffine(open_cv_image, M, (open_cv_image.shape[1], open_cv_image.shape[0]),
+                                      flags=cv2.INTER_CUBIC)
 
     # Get the new position of the nose after rotation
     nose_center = np.dot(M, np.array([nose_tip[0], nose_tip[1], 1])).astype(int)
@@ -114,7 +120,8 @@ def face_align(pil_image, predictor):
 
     # Apply the translation
     translation_matrix = np.float32([[1, 0, translation_x], [0, 1, translation_y]])
-    aligned_cv_image = cv2.warpAffine(rotated_cv_image, translation_matrix, (rotated_cv_image.shape[1], rotated_cv_image.shape[0]), flags=cv2.INTER_CUBIC)
+    aligned_cv_image = cv2.warpAffine(rotated_cv_image, translation_matrix,
+                                      (rotated_cv_image.shape[1], rotated_cv_image.shape[0]), flags=cv2.INTER_CUBIC)
 
     # Convert the aligned image back to PIL format
     aligned_pil_image = Image.fromarray(cv2.cvtColor(aligned_cv_image, cv2.COLOR_BGR2RGB))

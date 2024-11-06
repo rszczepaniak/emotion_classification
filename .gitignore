@@ -1,4 +1,5 @@
 data/
 data_unpacked/
+images/
 .vscode/
 **__pycache__
