@@ -26,24 +26,30 @@ def detect_faces(image_path, model, processor, threshold=0.9, padding=10):
         padding (int): Padding size for face detection.
 
     Returns:
-        List[Image]: List of cropped images containing only the detected faces.
+        List[np.array]: List of cropped images (as NumPy arrays) containing only the detected faces.
     """
     # Load the image
     if not os.path.exists(image_path):
         print(f"No image found: {image_path}")
         return []
 
-    # Open the image
-    image = Image.open(image_path).convert("RGB")
+    # Open the image using cv2
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"Failed to load image: {image_path}")
+        return []
 
-    # Preprocess the image
-    inputs = processor(images=image, return_tensors="pt")
+    # Convert the image from BGR to RGB (as Hugging Face models expect RGB)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # Preprocess the image for the model
+    inputs = processor(images=image_rgb, return_tensors="pt")
 
     # Run inference
     outputs = model(**inputs)
 
     # Post-process the outputs
-    target_sizes = torch.tensor([image.size[::-1]])  # Height, Width
+    target_sizes = torch.tensor([image_rgb.shape[:2]])  # Height, Width in RGB order
     results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=threshold)[0]
 
     # List to hold cropped face images
@@ -56,12 +62,14 @@ def detect_faces(image_path, model, processor, threshold=0.9, padding=10):
             box = [int(coord) for coord in box.tolist()]
             x_min, y_min, x_max, y_max = box
 
+            # Apply padding and ensure coordinates stay within image bounds
             x_min_padded = max(x_min - padding, 0)
             y_min_padded = max(y_min - padding, 0)
-            x_max_padded = min(x_max + padding, image.width)
-            y_max_padded = min(y_max + padding, image.height)
+            x_max_padded = min(x_max + padding, image.shape[1])  # Width
+            y_max_padded = min(y_max + padding, image.shape[0])  # Height
 
-            face_image = image.crop((x_min_padded, y_min_padded, x_max_padded, y_max_padded))
+            # Crop the face from the original BGR image
+            face_image = image[y_min_padded:y_max_padded, x_min_padded:x_max_padded]
             face_images.append(face_image)
             print(
                 f"Detected face with confidence "
