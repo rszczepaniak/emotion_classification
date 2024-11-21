@@ -1,16 +1,24 @@
 import os
 
 import cv2
+import dlib
 import numpy as np
+import pandas as pd
 import torch
 from scipy import io
+from torch import nn, optim
+from torch.utils.data import DataLoader
+from torchvision.transforms import transforms
 
-from configuration import IMAGES_DIR, UNPACKED_DATA_DIR, FDDB_IMAGE_DATASET, FDDB_DATASET_FILE_NAME
 from face_frontalization import frontalize, facial_feature_detector, camera_calibration
 from src.ArgumentParser import ArgumentParser
-from src.datasets.fer_dataset import create_train_dataloader
-from src.face_detector.face_detector import DnnDetector, HaarCascadeDetector
+from src.configuration import IMAGES_DIR, UNPACKED_DATA_DIR, FDDB_IMAGE_DATASET, FDDB_DATASET_FILE_NAME
+from src.datasets.fer_dataset import create_train_dataloader, FER2013
+from src.face_detector.face_detector import HaarCascadeDetector, DnnDetector
+from src.landmarks_detector import dlibLandmarks
+from src.model.cnn import EmotionCNN
 from src.parsing_data import get_images_data
+from src.plot import insert_data_into_json, plot_all_models
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -32,7 +40,7 @@ def get_faces_fddb(args, face_detector):
         img = cv2.imread(image.get("path_to_image"))
 
         for x, y, w, h in face_detector.detect_faces(img):
-            found_faces.extend(img) # [y:y + h, x:x + w]
+            found_faces.extend(img)  # [y:y + h, x:x + w]
             if len(found_faces) >= int(args.num_pictures_to_process):
                 break
         if len(found_faces) >= int(args.num_pictures_to_process):
@@ -51,7 +59,45 @@ def get_faces_fer(args):
     return found_faces
 
 
-def main(args):
+def apply_black_mask(img, landmarks, expansion_factor=0.1):
+    """
+    Create a mask for the face based on landmarks, enlarge the area, and black out everything else.
+    """
+    # Create a black mask of the same size as the image
+    mask = np.zeros_like(img)
+
+    # Convert landmarks to a NumPy array and ensure integer type
+    landmarks = np.array(landmarks, dtype=np.int32)
+
+    # Calculate the center of the landmarks
+    center = np.mean(landmarks, axis=0)
+
+    # Enlarge each landmark point away from the center
+    enlarged_landmarks = (landmarks - center) * expansion_factor + center
+    enlarged_landmarks = enlarged_landmarks.astype(np.int32)
+
+    # Create a convex hull for the enlarged landmarks
+    face_region = cv2.convexHull(enlarged_landmarks.reshape(-1, 1, 2))
+
+    # Fill the face region with white on the mask
+    cv2.fillConvexPoly(mask, face_region, (255, 255, 255))
+
+    # Apply the mask to the image
+    face_only = cv2.bitwise_and(img, mask)
+    return face_only
+
+
+class NumpyToTensorTransform:
+    def __call__(self, image):
+        # Convert the NumPy array to a tensor and scale to range [0, 1]
+        tensor_image = torch.tensor(image, dtype=torch.float32)
+        # Normalize if the data is in range [0, 255]
+        if tensor_image.max() > 1:
+            tensor_image = tensor_image / 255.0
+        return tensor_image
+
+
+def frontalize_faces(args):
     if args.haar:
         face_detector = HaarCascadeDetector("src/face_detector")
     else:
@@ -73,6 +119,7 @@ def main(args):
         lmarks = facial_feature_detector.get_landmarks(img)
         if lmarks is None:
             continue
+
         proj_matrix, camera_matrix, rmat, tvec = camera_calibration.estimate_camera(model3D, lmarks[0])
         eyemask = np.asarray(io.loadmat('face_frontalization/frontalization_models/eyemask.mat')['eyemask'])
         frontal_raw, frontal_sym = frontalize.frontalize(img, proj_matrix, model3D.ref_U, eyemask)
@@ -84,74 +131,122 @@ def main(args):
         cv2.imshow("Frontalized Symmetric", frontal_sym)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
-        # plt.figure()
-        # # plt.imshow(frontal_raw[:, :, ::-1])
-        # plt.imshow(frontal_sym[:, :, ::-1])
-        # plt.axis('off')
-        # plt.savefig(f"images/frontalized_face_{x}.png", bbox_inches='tight', pad_inches=0)
-        # plt.close()
-    #
-    # mini_xception = Mini_Xception().to(device)
-    # mini_xception.eval()
-    # face_alignment = FaceAlignment()
-    # if args.haar:
-    #     face_detector = HaarCascadeDetector("src/face_detector")
-    # else:
-    #     face_detector = DnnDetector("src/face_detector")
-    #
-    # while args.image:
-    #     frame = cv2.imread(args.path)
-    #
-    #     if args.path:
-    #         frame = cv2.resize(frame, (640, 480))
-    #
-    #     # faces
-    #     faces = face_detector.detect_faces(frame)
-    #
-    #     for face in faces:
-    #         (x, y, w, h) = face
-    #
-    #         # preprocessing
-    #         # cv2.imshow("pre", frame)
-    #         input_face = face_alignment.frontalize_face(face, frame)
-    #         # cv2.imshow("post", input_face)
-    #
-    #         input_face = cv2.resize(input_face, (48, 48))
-    #
-    #         # input_face = histogram_equalization(input_face)
-    #         cv2.imshow('input face', cv2.resize(input_face, (120, 120)))
-    #         cv2.waitKey(0)  # Waits for a key press to close the window
-    #         cv2.destroyAllWindows()
-    #         break
-    #         input_face = transforms.ToTensor()(input_face).to(device)
-    #         input_face = torch.unsqueeze(input_face, 0)
-    #
-    #         with torch.no_grad():
-    #             input_face = input_face.to(device)
-    #             emotion = mini_xception(input_face)
-    #             # print(f'\ntime={(time.time()-t) * 1000 } ms')
-    #
-    #             torch.set_printoptions(precision=6)
-    #             softmax = torch.nn.Softmax()
-    #             emotions_soft = softmax(emotion.squeeze()).reshape(-1, 1).cpu().detach().numpy()
-    #             emotions_soft = np.round(emotions_soft, 3)
-    #             for i, em in enumerate(emotions_soft):
-    #                 em = round(em.item(), 3)
-    #                 # print(f'{get_label_emotion(i)} : {em}')
-    #
-    #             emotion = torch.argmax(emotion)
-    #             percentage = round(emotions_soft[emotion].item(), 2)
-    #             emotion = emotion.squeeze().cpu().detach().item()
-    #             emotion = get_label_emotion(emotion)
-    #
-    #             frame[y - 30:y, x:x + w] = (50, 50, 50)
-    #             cv2.putText(frame, emotion, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 200))
-    #             cv2.putText(frame, str(percentage), (x + w - 40, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-    #                         (200, 200, 0))
-    #             cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 3)
-    #
-    #     cv2.putText(frame, str("fps"), (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0))
-    #     cv2.imshow("Image", frame)
+
+
+def display_tensor_with_opencv(tensor_image):
+    """
+    Display a PyTorch tensor image using OpenCV.
+    Args:
+        tensor_image (torch.Tensor): Tensor image of shape (C, H, W), normalized in [0, 1].
+    """
+    # Convert to NumPy array
+    image_np = tensor_image.permute(1, 2, 0).cpu().numpy()  # (C, H, W) -> (H, W, C)
+
+    # Scale to 0–255 if needed
+    if image_np.max() <= 1.0:
+        image_np = (image_np * 255).astype(np.uint8)
+
+    # Convert RGB to BGR for OpenCV
+    image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+
+    # Display the image
+    cv2.imshow("Image", image_bgr)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+def train_model(args):
+    model = EmotionCNN(num_classes=7)
+    model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Transformations for input data
+    transform = transforms.Compose([
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor()
+    ])
+
+    # Assuming `FER2013` is your dataset class
+    train_dataset = FER2013("data_unpacked", mode='train', transform=transform)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=lambda batch: [(img, label) for img, label in batch if img is not None])  # Change batch size as needed
+
+    eval_dataset = FER2013("data_unpacked", mode='val', transform=transform)
+    eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=False, collate_fn=lambda batch: [(img, label) for img, label in batch if img is not None])
+
+    num_epochs = 1
+    train_losses = []
+    train_accuracies = []
+    eval_accuracies = []
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()  # Set model to training mode
+        running_loss = 0.0
+        correct_predictions = 0
+        total_predictions = 0
+
+        for inputs, labels in train_loader:  # Assuming `train_loader` is your DataLoader
+            # Move data to the appropriate device
+            if inputs is None:
+                continue
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            # Zero the parameter gradients
+            optimizer.zero_grad()
+
+            # Forward pass
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+
+            # Calculate accuracy
+            _, predicted = torch.max(outputs.data, 1)  # Get the index of the max output
+            correct_predictions += (predicted == labels).sum().item()
+            total_predictions += labels.size(0)
+
+            # Accumulate loss
+            running_loss += loss.item()
+
+        # Calculate and print accuracy for this epoch
+        epoch_accuracy = 100 * correct_predictions / total_predictions
+        train_losses.append(running_loss / len(train_loader))
+        train_accuracies.append(epoch_accuracy)
+
+        print(
+            f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(train_loader):.4f}, Accuracy: {epoch_accuracy:.2f}%')
+
+        model.eval()  # Set model to evaluation mode
+        eval_correct_predictions = 0
+        eval_total_predictions = 0
+
+        with torch.no_grad():  # Disable gradient calculation for evaluation
+            for inputs, labels in eval_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+
+                outputs = model(inputs)
+                _, predicted = torch.max(outputs.data, 1)  # Get the index of the max output
+                eval_correct_predictions += (predicted == labels).sum().item()
+                eval_total_predictions += labels.size(0)
+
+        # Calculate evaluation accuracy
+        eval_accuracy = 100 * eval_correct_predictions / eval_total_predictions
+        eval_accuracies.append(eval_accuracy)
+
+        print(f'Epoch [{epoch + 1}/{num_epochs}], Evaluation Accuracy: {eval_accuracy:.2f}%')
+    insert_data_into_json("FER", "Raw_image_1", num_epochs, train_accuracies, eval_accuracies)
+
+
+def print_plots(dataset_name, num_epochs):
+    plot_all_models(dataset_name, num_epochs)
+
+
+def main(args):
+    train_model(args)
+    # print_plots("FER", 100)
 
 
 if __name__ == "__main__":

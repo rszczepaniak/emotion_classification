@@ -1,6 +1,10 @@
+import os
+
 import cv2
 import numpy as np
-import os
+
+from src.utils import normalization
+
 
 # Abstract class / Interface
 class FaceDetectorIface:
@@ -32,41 +36,83 @@ class DnnDetector(FaceDetectorIface):
             self.model_weights = os.path.join(root, self.model_weights)
 
         self.detector = cv2.dnn.readNetFromCaffe(prototxt=self.prototxt, caffeModel=self.model_weights)
-        self.threshold = 0.9 # to remove weak detections
+        self.threshold = 0.1 # to remove weak detections
 
-    def detect_faces(self,frame):
-        h = frame.shape[0]
-        w = frame.shape[1]
-
-        # required preprocessing(mean & variance(scale) & size) to use the dnn model
+    @staticmethod
+    def sharpen_image(image):
         """
-            Problem of not detecting small faces if the image is big (720p or 1080p)
-            because we resize to 300,300 ... but if we use the original size it will detect right but so slow
-        """
-        # resized_frame = cv2.resize(frame, (300, 300))
-        # resized_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
+        Apply a sharpening filter to the input image.
 
-        blob = cv2.dnn.blobFromImage(frame, 1.0, frame.shape[0:2], (104.0, 177.0, 123.0), swapRB=False, crop=False)
-        # detect
+        Args:
+            image: Input image (NumPy array).
+
+        Returns:
+            Sharpened image.
+        """
+        # Define a sharpening kernel
+        sharpen_kernel = np.array([[0, -1, 0],
+                                   [-1, 5, -1],
+                                   [0, -1, 0]])
+
+        # Apply the filter to the image
+        sharpened_image = cv2.filter2D(image, -1, sharpen_kernel)
+        return sharpened_image
+
+    def detect_faces(self, image):
+        """
+        Preprocess the input image, run face detection, and display detected faces.
+
+        Args:
+            image: Input image as a NumPy array.
+
+        Returns:
+            List of detected faces in (x, y, w, h) format.
+        """
+        # Store original dimensions
+        original_h, original_w = image.shape[:2]
+
+        # Ensure the image has 3 channels
+        if image.shape[-1] != 3:  # If not already 3 channels
+            image = cv2.merge([image, image, image])  # Stack grayscale into 3 channels
+
+        # sharp_image = self.sharpen_image(image)
+        # Resize image to 300x300 for the detector
+        resized_image = cv2.resize(image, (300, 300))
+
+        cv2.imshow("resized_image", resized_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        cv2.imshow("norm", normalization(resized_image))
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+
+        # Preprocess the image: create a blob
+        blob = cv2.dnn.blobFromImage(resized_image, 1.0, (300, 300), (104.0, 177.0, 123.0))
+
+        # Perform detection
         self.detector.setInput(blob)
         detections = self.detector.forward()
-        faces = []
-        # shape 2 is num of detections
-        print("dets: ", detections.shape[2])
+
+        cropped_faces = []
         for i in range(detections.shape[2]):
-            confidence = detections[0,0,i,2]
+            # Extract confidence of detection
+            confidence = detections[0, 0, i, 2]
             if confidence < self.threshold:
                 continue
 
-            # model output is percentage of bbox dims
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            # Extract bounding box, scale back to original image size
+            box = detections[0, 0, i, 3:7] * np.array([original_w, original_h, original_w, original_h])
             box = box.astype("int")
-            (x1,y1, x2,y2) = box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            (x1, y1, x2, y2) = box
 
-            cv2.imshow("boxed frame", frame)
-            cv2.waitKey(0)
-            # x,y,w,h
-            faces.append((x1,y1,x2-x1,y2-y1))
-            # print(confidence)
-        return faces
+            # Ensure the bounding box is within image boundaries
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(original_w, x2), min(original_h, y2)
+
+            # Crop the face region from the original image
+            if x2 > x1 and y2 > y1:  # Ensure valid bounding box dimensions
+                cropped_face = image[y1:y2, x1:x2]
+                cropped_faces.append(cropped_face)
+
+        return cropped_faces

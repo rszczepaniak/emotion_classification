@@ -2,14 +2,49 @@ import argparse
 import os
 
 import cv2
+import dlib
 import numpy as np
 import pandas as pd
 import torchvision.transforms.transforms as transforms
+from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 from src.face_alignment import FaceAlignment
-from src.utils import get_label_emotion, histogram_equalization, standerlization, normalize_dataset_mode_255, \
+from src.landmarks_detector import dlibLandmarks
+from src.utils import get_label_emotion, standerlization, normalize_dataset_mode_255, \
     get_transforms
+
+
+def crop_eyes(image):
+    # image = image.transpose(1, 2, 0)
+    # image = (image * 255.0).astype(np.uint8)
+    image = cv2.resize(image, (300, 300))
+    height, width = image.shape
+    # cv2.imshow('image', image)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+    # Detect landmarks
+    landmarks_detector = dlibLandmarks()
+    rect = dlib.rectangle(left=0, top=0, right=width, bottom=height)
+    landmarks = landmarks_detector.detect_landmarks(image, rect)  # Assuming landmarks are in (x, y) format
+
+    right_eye = ((landmarks[0] + landmarks[1]) // 2).astype(np.uint8)
+    left_eye = ((landmarks[2] + landmarks[3]) // 2).astype(np.uint8)
+
+    x_min = max(0, min(left_eye[0], right_eye[0]) - int(width * 0.1))
+    x_max = min(width, max(left_eye[0], right_eye[0]) + int(width * 0.1))
+    y_min = max(0, min(left_eye[1], right_eye[1]) - int(height * 0.1))
+    y_max = min(height, max(left_eye[1], right_eye[1]) + int(height * 0.1))
+
+    # Crop the region
+    eyes_crop = image[y_min:y_max, x_min:x_max]
+    if eyes_crop.any():
+        # cv2.imshow('cropped', eyes_crop)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+        # eyes_crop = (eyes_crop / 255.0).astype(np.float32)
+        return cv2.resize(eyes_crop, (100, 50))
+    return None
 
 
 class FER2013(Dataset):
@@ -46,16 +81,25 @@ class FER2013(Dataset):
         emotion = data_series['emotion']
         pixels = data_series['pixels']
 
-        # to numpy
-        face = list(map(int, pixels.split(' ')))
-        face = np.array(face).reshape(48, 48).astype(np.uint8)
+        try:
+            # to numpy
+            face = list(map(int, pixels.split(' ')))
+            face = np.array(face).reshape(48, 48).astype(np.uint8)
 
-        if self.transform:
-            face = histogram_equalization(face)
-            # face = normalization(face)
-            # face = self.transform(face)
+            # Add error handling for crop_eyes
+            face = crop_eyes(face)
+            if face is None:
+                # Skip this item if crop fails
+                return None, emotion
 
-        return face, emotion
+            face = Image.fromarray(face)
+            face = self.transform(face)
+            return face, emotion
+
+        except Exception as e:
+            # Log the error if needed
+            print(f"Error processing image at index {index}: {e}")
+            return None, emotion
 
     def __len__(self) -> int:
         return self.df.index.size
