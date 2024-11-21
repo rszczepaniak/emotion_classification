@@ -1,5 +1,7 @@
 import argparse
 import os
+from functools import lru_cache
+from multiprocessing import Pool, cpu_count
 
 import cv2
 import dlib
@@ -8,22 +10,17 @@ import pandas as pd
 import torchvision.transforms.transforms as transforms
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 from src.face_alignment import FaceAlignment
 from src.landmarks_detector import dlibLandmarks
 from src.utils import get_label_emotion, standerlization, normalize_dataset_mode_255, \
-    get_transforms
+    get_transforms, apply_clahe, histogram_equalization
 
 
 def crop_eyes(image):
-    # image = image.transpose(1, 2, 0)
-    # image = (image * 255.0).astype(np.uint8)
     image = cv2.resize(image, (300, 300))
     height, width = image.shape
-    # cv2.imshow('image', image)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-    # Detect landmarks
     landmarks_detector = dlibLandmarks()
     rect = dlib.rectangle(left=0, top=0, right=width, bottom=height)
     landmarks = landmarks_detector.detect_landmarks(image, rect)  # Assuming landmarks are in (x, y) format
@@ -31,20 +28,77 @@ def crop_eyes(image):
     right_eye = ((landmarks[0] + landmarks[1]) // 2).astype(np.uint8)
     left_eye = ((landmarks[2] + landmarks[3]) // 2).astype(np.uint8)
 
-    x_min = max(0, min(left_eye[0], right_eye[0]) - int(width * 0.1))
-    x_max = min(width, max(left_eye[0], right_eye[0]) + int(width * 0.1))
-    y_min = max(0, min(left_eye[1], right_eye[1]) - int(height * 0.1))
-    y_max = min(height, max(left_eye[1], right_eye[1]) + int(height * 0.1))
+    # Use safe conversion and clamping
+    x_min = max(0, int(min(left_eye[0], right_eye[0]) - width * 0.1))
+    x_max = min(width, int(max(left_eye[0], right_eye[0]) + width * 0.1))
+    y_min = max(0, int(min(left_eye[1], right_eye[1]) - height * 0.1))
+    y_max = min(height, int(max(left_eye[1], right_eye[1]) + height * 0.1))
 
     # Crop the region
     eyes_crop = image[y_min:y_max, x_min:x_max]
     if eyes_crop.any():
-        # cv2.imshow('cropped', eyes_crop)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        # eyes_crop = (eyes_crop / 255.0).astype(np.float32)
         return cv2.resize(eyes_crop, (100, 50))
     return None
+
+
+@lru_cache(maxsize=10000)
+def preprocess_image(pixels_str):
+    try:
+        # Convert string to numpy array
+        face = np.fromstring(pixels_str, sep=' ').reshape(48, 48).astype(np.uint8)
+
+        # Resize and process
+        face = cv2.resize(face, (300, 300))
+        # cv2.imshow("face", face)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+        face = apply_clahe(face)
+        # face = histogram_equalization(face)
+        # cv2.imshow("face eq", face)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+
+        # height, width = face.shape
+        # landmarks_detector = dlibLandmarks()
+        # rect = dlib.rectangle(left=0, top=0, right=width, bottom=height)
+        # landmarks = landmarks_detector.detect_landmarks(face, rect)
+        #
+        # right_eye = ((landmarks[0] + landmarks[1]) // 2).astype(np.uint8)
+        # left_eye = ((landmarks[2] + landmarks[3]) // 2).astype(np.uint8)
+        #
+        # x_min = max(0, int(min(left_eye[0], right_eye[0]) - width * 0.1))
+        # x_max = min(width, int(max(left_eye[0], right_eye[0]) + width * 0.1))
+        # y_min = max(0, int(min(left_eye[1], right_eye[1]) - height * 0.1))
+        # y_max = min(height, int(max(left_eye[1], right_eye[1]) + height * 0.1))
+        #
+        # face = face[y_min:y_max, x_min:x_max]
+        if face.any():
+            face = cv2.resize(face, (48, 48))  # (48, 24)
+            # cv2.imshow("processed", face)
+            # cv2.waitKey(0)
+            # cv2.destroyAllWindows()
+            return face
+        return  None
+    except Exception as e:
+        print(f"SOMETHING WENT WRONG: {e}")
+        return None
+
+def process_row(pixels):
+    return preprocess_image(pixels)
+
+def prepare_dataframe(csv_path, mode="train"):
+    df = pd.read_csv(csv_path)
+    mode_map = {'train': 'Training', 'val': 'PrivateTest', 'test': 'PublicTest'}
+    df = df[df['Usage'] == mode_map[mode]]
+
+    with Pool(cpu_count()) as pool:
+        df['face'] = list(tqdm(pool.imap(process_row, df['pixels']), total=len(df['pixels'])))
+
+    # df['face'] = df['pixels'].apply(preprocess_image)
+    df = df.dropna(subset=['face'])
+    return df[['emotion', 'face']]
+
+
 
 
 class FER2013(Dataset):
@@ -59,53 +113,29 @@ class FER2013(Dataset):
     """
 
     def __init__(self, root='data_unpacked', mode='train', transform=None):
-
         self.root = root
         self.transform = transform
         assert mode in ['train', 'val', 'test']
-        self.mode = mode
 
         self.csv_path = os.path.join(self.root, 'fer2013.csv')
-        self.df = pd.read_csv(self.csv_path)
+        self.df = prepare_dataframe(self.csv_path, mode)
         # print(self.df)
-
-        if self.mode == 'train':
-            self.df = self.df[self.df['Usage'] == 'Training']
-        elif self.mode == 'val':
-            self.df = self.df[self.df['Usage'] == 'PrivateTest']
-        else:
-            self.df = self.df[self.df['Usage'] == 'PublicTest']
 
     def __getitem__(self, index: int):
         data_series = self.df.iloc[index]
         emotion = data_series['emotion']
-        pixels = data_series['pixels']
+        face = data_series['face']
 
-        try:
-            # to numpy
-            face = list(map(int, pixels.split(' ')))
-            face = np.array(face).reshape(48, 48).astype(np.uint8)
-
-            # Add error handling for crop_eyes
-            face = crop_eyes(face)
-            if face is None:
-                # Skip this item if crop fails
-                return None, emotion
-
-            face = Image.fromarray(face)
-            face = self.transform(face)
-            return face, emotion
-
-        except Exception as e:
-            # Log the error if needed
-            print(f"Error processing image at index {index}: {e}")
-            return None, emotion
+        # Convert to PIL Image
+        face = Image.fromarray(face)
+        face = self.transform(face)
+        return face, emotion
 
     def __len__(self) -> int:
         return self.df.index.size
 
 
-def create_train_dataloader(root='data_unpacked', batch_size=64):
+def create_train_dataloader(root='data_unpacked', batch_size=32):
     dataset = FER2013(root, mode='train', transform=get_transforms())
     dataloader = DataLoader(dataset, batch_size, shuffle=True)
     return dataloader

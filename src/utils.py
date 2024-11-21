@@ -48,28 +48,41 @@ def tensor_to_numpy(image):
 
 
 def histogram_equalization(image):
-    # Step 1: Convert the image to grayscale (since it's grayscale, we can use just one channel)
-    gray_image = image[:, :, 0]  # Grayscale, so all channels are identical
-    gray_image = np.clip(gray_image * 255, 0, 255).astype(np.uint8)  # Rescale to 0-255 and convert to uint8
+    # Check if the image is already in grayscale
+    if len(image.shape) == 3:
+        # Convert to grayscale if image is in color
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        # If already grayscale, use the image as is
+        gray_image = image
 
-    # Step 2: Apply histogram equalization to the grayscale image
+    # Apply histogram equalization
     equalized_gray = cv2.equalizeHist(gray_image)
 
-    # Step 3: Upscale back to 3 channels (replicate the grayscale channel)
-    equalized_image = np.stack([equalized_gray] * 3, axis=-1)
+    # If the original image was color, replicate the grayscale equalized channel to 3 channels
+    if len(image.shape) == 3:
+        equalized_image = cv2.cvtColor(equalized_gray, cv2.COLOR_GRAY2BGR)
+    else:
+        # If the original image was grayscale, return the equalized grayscale image
+        equalized_image = equalized_gray
 
     return equalized_image
 
 
+
 def apply_clahe(image):
-    # Convert to grayscale if image is in color (optional)
-    gray_image = image[:, :, 0]  # Grayscale, so all channels are identical
-    gray_image = np.clip(gray_image * 255, 0, 255).astype(np.uint8)  # Rescale to 0-255 and convert to uint8
+    # Check if the image is already in grayscale (2D array)
+    if len(image.shape) == 3:
+        # Convert to grayscale if image is in color (3D array)
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        # If already grayscale, use the image as is
+        gray_image = image
 
     # Create CLAHE object with a clip limit and tile grid size
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-    # Apply CLAHE
+    # Apply CLAHE to the grayscale image
     clahe_image = clahe.apply(gray_image)
 
     return clahe_image

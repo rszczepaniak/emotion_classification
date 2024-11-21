@@ -19,14 +19,14 @@ def insert_data_into_json(dataset_name: str, plot_name: str, num_epochs: int, tr
         json.dump(data, json_file)
 
 
-def plot_all_models(dataset_name: str, num_epochs: int, json_data_path: str = "models_training_results.json") -> None:
-    with open(json_data_path, "r") as json_file:
+def plot_all_models(dataset_name: str, num_epochs: int, name_prefix: str, applied_transformation: str = "") -> None:
+    with open("models_training_results.json", "r") as json_file:
         data = json.load(json_file)
     colors = ("orange", "blue", "green", "red", "purple", "cyan", "yellow")
     color_id = 0
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
-
+    plt.title(name_prefix)
     # Plot training accuracy
     axes[0].set_title('Training Accuracy')
     axes[0].set_xlabel('Epochs')
@@ -39,7 +39,7 @@ def plot_all_models(dataset_name: str, num_epochs: int, json_data_path: str = "m
     axes[1].set_ylim(0, 100)
 
     for trained_model in data:
-        if trained_model["dataset_name"] == dataset_name and trained_model["num_epochs"] == num_epochs:
+        if trained_model["dataset_name"] == dataset_name and trained_model["num_epochs"] == num_epochs and trained_model["name"].startswith(name_prefix) and applied_transformation in trained_model["name"]:
             # Plot training accuracy
             axes[0].plot(
                 range(1, num_epochs + 1),

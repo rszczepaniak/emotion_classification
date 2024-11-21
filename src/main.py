@@ -1,26 +1,21 @@
 import os
 
 import cv2
-import dlib
 import numpy as np
-import pandas as pd
 import torch
 from scipy import io
 from torch import nn, optim
 from torch.utils.data import DataLoader
-from torchvision.transforms import transforms
+from torchvision.transforms import transforms, RandomHorizontalFlip
 
 from face_frontalization import frontalize, facial_feature_detector, camera_calibration
 from src.ArgumentParser import ArgumentParser
 from src.configuration import IMAGES_DIR, UNPACKED_DATA_DIR, FDDB_IMAGE_DATASET, FDDB_DATASET_FILE_NAME
 from src.datasets.fer_dataset import create_train_dataloader, FER2013
 from src.face_detector.face_detector import HaarCascadeDetector, DnnDetector
-from src.landmarks_detector import dlibLandmarks
 from src.model.cnn import EmotionCNN
 from src.parsing_data import get_images_data
 from src.plot import insert_data_into_json, plot_all_models
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def get_current_image_index() -> int:
@@ -156,8 +151,11 @@ def display_tensor_with_opencv(tensor_image):
 
 
 def train_model(args):
-    model = EmotionCNN(num_classes=7)
-    model.to(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # print(f"device: {device}")
+
+    # Ensure model and data are on the same device
+    model = EmotionCNN(num_classes=7).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
@@ -167,51 +165,38 @@ def train_model(args):
         transforms.ToTensor()
     ])
 
-    # Assuming `FER2013` is your dataset class
+    # Prepare datasets and loaders
     train_dataset = FER2013("data_unpacked", mode='train', transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=lambda batch: [(img, label) for img, label in batch if img is not None])  # Change batch size as needed
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
 
     eval_dataset = FER2013("data_unpacked", mode='val', transform=transform)
-    eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=False, collate_fn=lambda batch: [(img, label) for img, label in batch if img is not None])
+    eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
 
-    num_epochs = 1
-    train_losses = []
-    train_accuracies = []
-    eval_accuracies = []
+    num_epochs = 100
+    train_losses, train_accuracies, eval_accuracies = [], [], []
 
     # Training loop
     for epoch in range(num_epochs):
-        model.train()  # Set model to training mode
-        running_loss = 0.0
-        correct_predictions = 0
-        total_predictions = 0
+        model.train()
+        running_loss, correct_predictions, total_predictions = 0.0, 0, 0
 
-        for inputs, labels in train_loader:  # Assuming `train_loader` is your DataLoader
-            # Move data to the appropriate device
-            if inputs is None:
-                continue
+        for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
 
-            # Zero the parameter gradients
             optimizer.zero_grad()
-
-            # Forward pass
             outputs = model(inputs)
+
             loss = criterion(outputs, labels)
 
-            # Backward pass and optimize
             loss.backward()
             optimizer.step()
 
-            # Calculate accuracy
-            _, predicted = torch.max(outputs.data, 1)  # Get the index of the max output
+            _, predicted = torch.max(outputs.data, 1)
             correct_predictions += (predicted == labels).sum().item()
             total_predictions += labels.size(0)
-
-            # Accumulate loss
             running_loss += loss.item()
 
-        # Calculate and print accuracy for this epoch
+        # Training metrics
         epoch_accuracy = 100 * correct_predictions / total_predictions
         train_losses.append(running_loss / len(train_loader))
         train_accuracies.append(epoch_accuracy)
@@ -219,35 +204,35 @@ def train_model(args):
         print(
             f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(train_loader):.4f}, Accuracy: {epoch_accuracy:.2f}%')
 
-        model.eval()  # Set model to evaluation mode
-        eval_correct_predictions = 0
-        eval_total_predictions = 0
+        # Evaluation
+        model.eval()
+        eval_correct_predictions, eval_total_predictions = 0, 0
 
-        with torch.no_grad():  # Disable gradient calculation for evaluation
+        with torch.no_grad():
             for inputs, labels in eval_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
 
                 outputs = model(inputs)
-                _, predicted = torch.max(outputs.data, 1)  # Get the index of the max output
+                _, predicted = torch.max(outputs.data, 1)
                 eval_correct_predictions += (predicted == labels).sum().item()
                 eval_total_predictions += labels.size(0)
 
-        # Calculate evaluation accuracy
+        # Evaluation metrics
         eval_accuracy = 100 * eval_correct_predictions / eval_total_predictions
         eval_accuracies.append(eval_accuracy)
 
         print(f'Epoch [{epoch + 1}/{num_epochs}], Evaluation Accuracy: {eval_accuracy:.2f}%')
-    insert_data_into_json("FER", "Raw_image_1", num_epochs, train_accuracies, eval_accuracies)
+
+    insert_data_into_json("FER", "Raw_image_clahe", num_epochs, train_accuracies, eval_accuracies)
 
 
-def print_plots(dataset_name, num_epochs):
-    plot_all_models(dataset_name, num_epochs)
+def print_plots(dataset_name, num_epochs, name_prefix):
+    plot_all_models(dataset_name, num_epochs, name_prefix)
 
 
 def main(args):
     train_model(args)
-    # print_plots("FER", 100)
-
+    # print_plots("FER", 100, "Raw_image")
 
 if __name__ == "__main__":
     parser = ArgumentParser()

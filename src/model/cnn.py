@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -18,12 +19,23 @@ class EmotionCNN(nn.Module):
         self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
         self.bn3 = nn.BatchNorm2d(128)
 
-        # Fully connected layers
-        self.fc1 = nn.Linear(128 * 6 * 6, 128)  # Assuming input image size is 48x48
+        conv_output_size = self._get_conv_output_size((3, 48, 48))  # Adjust based on actual input size  (3, 24, 48)
+        self.fc1 = nn.Linear(conv_output_size, 128)
         self.fc2 = nn.Linear(128, num_classes)
 
         # Dropout layer
         self.dropout = nn.Dropout(0.5)
+
+    def _get_conv_output_size(self, input_shape):
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *input_shape)
+            x = F.relu(self.bn1(self.conv1(dummy_input)))
+            x = F.max_pool2d(x, kernel_size=2, stride=2)
+            x = F.relu(self.bn2(self.conv2(x)))
+            x = F.max_pool2d(x, kernel_size=2, stride=2)
+            x = F.relu(self.bn3(self.conv3(x)))
+            x = F.max_pool2d(x, kernel_size=2, stride=2)
+            return x.numel()
 
     def forward(self, x):
         # Apply first convolutional block
@@ -39,7 +51,7 @@ class EmotionCNN(nn.Module):
         x = F.max_pool2d(x, kernel_size=2, stride=2)
 
         # Flatten the tensor for the fully connected layer
-        x = x.view(-1, 128 * 6 * 6)  # Adjust this based on input size
+        x = x.view(x.size(0), -1)  # Dynamically calculate batch size
 
         # Apply fully connected layers
         x = F.relu(self.fc1(x))
