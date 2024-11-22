@@ -3,8 +3,11 @@ import os
 from functools import lru_cache
 from multiprocessing import Pool, cpu_count
 
+from absl import logging
+
 import cv2
 import dlib
+import mediapipe as mp
 import numpy as np
 import pandas as pd
 import torchvision.transforms.transforms as transforms
@@ -15,76 +18,225 @@ from tqdm import tqdm
 from src.face_alignment import FaceAlignment
 from src.landmarks_detector import dlibLandmarks
 from src.utils import get_label_emotion, standerlization, normalize_dataset_mode_255, \
-    get_transforms, apply_clahe, histogram_equalization
+    get_transforms
 
 
-def crop_eyes(image):
-    image = cv2.resize(image, (300, 300))
+def detect_landmarks(image):
+    """
+    Detects facial landmarks using dlib.
+    """
     height, width = image.shape
     landmarks_detector = dlibLandmarks()
     rect = dlib.rectangle(left=0, top=0, right=width, bottom=height)
-    landmarks = landmarks_detector.detect_landmarks(image, rect)  # Assuming landmarks are in (x, y) format
+    landmarks = landmarks_detector.detect_landmarks(image, rect)
+    return landmarks
 
-    right_eye = ((landmarks[0] + landmarks[1]) // 2).astype(np.uint8)
-    left_eye = ((landmarks[2] + landmarks[3]) // 2).astype(np.uint8)
 
-    # Use safe conversion and clamping
+def convert_pixels_to_image(pixels_str):
+    """
+    Converts a pixel string to a 48x48 image.
+    """
+    face = np.fromstring(pixels_str, sep=' ').reshape(48, 48).astype(np.uint8)
+    return face
+
+
+def resize_image(image, size):
+    """
+    Resizes an image to the given size.
+    """
+    return cv2.resize(image, size)
+
+
+def detect_landmarks_with_mediapipe(image):
+    """
+    Detect facial landmarks using Mediapipe.
+    """
+    mp_face_mesh = mp.solutions.face_mesh
+    with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True) as face_mesh:
+        results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        if not results.multi_face_landmarks:
+            return None
+        landmarks = results.multi_face_landmarks[0]
+        return [(lm.x * image.shape[1], lm.y * image.shape[0]) for lm in landmarks.landmark]
+
+
+def display_landmarks(image, landmarks):
+    """
+    Displays the detected landmarks on the image.
+
+    Args:
+        image (numpy.ndarray): The original image.
+        landmarks (list): List of tuples containing landmark coordinates (x, y).
+    """
+    if landmarks is None:
+        print("No landmarks detected.")
+        return
+
+    # Make a copy of the image to draw landmarks on
+    output_image = image.copy()
+
+    # Draw each landmark as a small circle
+    for (x, y) in landmarks:
+        cv2.circle(output_image, (int(x), int(y)), radius=2, color=(0, 255, 0), thickness=-1)
+
+    # Display the image with landmarks
+    cv2.imshow('Landmarks', output_image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+def draw_eye_alignment(image, left_eye, right_eye):
+    """
+    Draws eye landmarks, the line connecting both eyes, and a horizontal alignment line.
+
+    Args:
+        image (numpy.ndarray): Input image.
+        left_eye (tuple): Coordinates of the left eye center (x, y).
+        right_eye (tuple): Coordinates of the right eye center (x, y).
+        angle (float): Rotation angle used for alignment.
+
+    Returns:
+        numpy.ndarray: Image with the visualization.
+    """
+    output_image = image.copy()
+
+    # Draw eye centers
+    if left_eye is not None:
+        cv2.circle(output_image, (int(left_eye[0]), int(left_eye[1])), 5, (255, 0, 0), -1)  # Blue for left eye
+    if right_eye is not None:
+        cv2.circle(output_image, (int(right_eye[0]), int(right_eye[1])), 5, (0, 0, 255), -1)  # Red for right eye
+
+    return output_image
+
+
+def display_eye_centers(image, left_eye, right_eye):
+    """
+    Visualizes the centers of the left and right eyes on the image.
+
+    Args:
+        image (numpy.ndarray): The original image.
+        left_eye (tuple): Coordinates of the left eye center (x, y).
+        right_eye (tuple): Coordinates of the right eye center (x, y).
+    """
+    # Make a copy of the image to draw on
+    output_image = image.copy()
+
+    # Draw the left eye center (blue)
+    cv2.circle(output_image, (int(left_eye[0]), int(left_eye[1])), radius=5, color=(255, 0, 0), thickness=-1)
+
+    # Draw the right eye center (red)
+    cv2.circle(output_image, (int(right_eye[0]), int(right_eye[1])), radius=5, color=(0, 0, 255), thickness=-1)
+
+    # Display the image with the eye centers
+    cv2.imshow('Eye Centers', output_image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+def get_mediapipe_eye_centers(landmarks):
+    """
+    Returns the centers of the left and right eyes from the landmarks.
+    """
+    left_eye_landmarks = [463, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382, 362]  # Left
+    right_eye_landmarks = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7]  # right
+    # Eye landmarks based on Mediapipe face mesh model
+    right_eye = np.mean([landmarks[i] for i in left_eye_landmarks], axis=0).astype(np.uint8)
+    left_eye = np.mean([landmarks[i] for i in right_eye_landmarks], axis=0).astype(np.uint8)
+    return left_eye, right_eye
+
+
+def compute_rotation_angle(left_eye, right_eye):
+    """
+    Computes the angle of rotation required to align the eyes.
+    """
+    dx = int(right_eye[0]) - int(left_eye[0])
+    dy = int(right_eye[1]) - int(left_eye[1])
+    angle = np.degrees(np.arctan2(dy, dx))
+    return angle
+
+
+def rotate_image(image, angle, center):
+    """
+    Rotates the image around a given center and angle.
+    """
+    h, w = image.shape
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated_image = cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_LINEAR)
+    return rotated_image
+
+
+def rotate_eye_centers(left_eye, right_eye, angle, center):
+    """
+    Rotates the eye centers around a given center point and angle.
+
+    Args:
+        left_eye (tuple): Coordinates of the left eye center (x, y).
+        right_eye (tuple): Coordinates of the right eye center (x, y).
+        angle (float): The angle of rotation in degrees (positive is counterclockwise).
+        center (tuple): The center of rotation (cx, cy).
+
+    Returns:
+        tuple: Rotated left_eye and right_eye as new coordinates.
+    """
+    # Get the rotation matrix
+    rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    # Convert eye centers to numpy arrays for matrix operations
+    left_eye_point = np.array([left_eye[0], left_eye[1], 1]).reshape(3, 1)  # Homogeneous coordinates
+    right_eye_point = np.array([right_eye[0], right_eye[1], 1]).reshape(3, 1)
+
+    # Apply rotation
+    rotated_left_eye = np.dot(rotation_matrix, left_eye_point).flatten()
+    rotated_right_eye = np.dot(rotation_matrix, right_eye_point).flatten()
+
+    # Return the rotated eye coordinates
+    return (rotated_left_eye[:2], rotated_right_eye[:2])
+
+
+def crop_image_around_eyes(image, left_eye, right_eye):
+    """
+    Crops the image so that the eyes are level and centered at the middle height.
+    """
+    height, width = image.shape
     x_min = max(0, int(min(left_eye[0], right_eye[0]) - width * 0.1))
     x_max = min(width, int(max(left_eye[0], right_eye[0]) + width * 0.1))
-    y_min = max(0, int(min(left_eye[1], right_eye[1]) - height * 0.1))
-    y_max = min(height, int(max(left_eye[1], right_eye[1]) + height * 0.1))
+    y_center = (left_eye[1] + right_eye[1]) // 2
+    y_min = max(0, int(y_center - height * 0.2))
+    y_max = min(height, int(y_center + height * 0.2))
 
-    # Crop the region
-    eyes_crop = image[y_min:y_max, x_min:x_max]
-    if eyes_crop.any():
-        return cv2.resize(eyes_crop, (100, 50))
-    return None
+    cropped_face = image[y_min:y_max, x_min:x_max]
+    return cropped_face if cropped_face.size > 0 else None
 
 
 @lru_cache(maxsize=10000)
 def preprocess_image(pixels_str):
     try:
-        # Convert string to numpy array
-        face = np.fromstring(pixels_str, sep=' ').reshape(48, 48).astype(np.uint8)
+        face = convert_pixels_to_image(pixels_str)
+        face = resize_image(face, (300, 300))
 
-        # Resize and process
-        face = cv2.resize(face, (300, 300))
-        # cv2.imshow("face", face)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        face = apply_clahe(face)
-        # face = histogram_equalization(face)
-        # cv2.imshow("face eq", face)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
+        landmarks = detect_landmarks_with_mediapipe(face)
+        if landmarks is None:
+            return None
 
-        # height, width = face.shape
-        # landmarks_detector = dlibLandmarks()
-        # rect = dlib.rectangle(left=0, top=0, right=width, bottom=height)
-        # landmarks = landmarks_detector.detect_landmarks(face, rect)
-        #
-        # right_eye = ((landmarks[0] + landmarks[1]) // 2).astype(np.uint8)
-        # left_eye = ((landmarks[2] + landmarks[3]) // 2).astype(np.uint8)
-        #
-        # x_min = max(0, int(min(left_eye[0], right_eye[0]) - width * 0.1))
-        # x_max = min(width, int(max(left_eye[0], right_eye[0]) + width * 0.1))
-        # y_min = max(0, int(min(left_eye[1], right_eye[1]) - height * 0.1))
-        # y_max = min(height, int(max(left_eye[1], right_eye[1]) + height * 0.1))
-        #
-        # face = face[y_min:y_max, x_min:x_max]
-        if face.any():
-            face = cv2.resize(face, (48, 48))  # (48, 24)
-            # cv2.imshow("processed", face)
-            # cv2.waitKey(0)
-            # cv2.destroyAllWindows()
-            return face
-        return  None
+        left_eye, right_eye = get_mediapipe_eye_centers(landmarks)
+
+        angle = compute_rotation_angle(left_eye, right_eye)
+        face = rotate_image(face, angle, center=(face.shape[1] // 2, face.shape[0] // 2))
+        left_eye, right_eye = rotate_eye_centers(left_eye, right_eye, angle,
+                                                 center=(face.shape[1] // 2, face.shape[0] // 2))
+
+        face = crop_image_around_eyes(face, left_eye, right_eye)
+        if face is not None:
+            face = resize_image(face, (48, 24))
+        return face
     except Exception as e:
         print(f"SOMETHING WENT WRONG: {e}")
         return None
 
+
 def process_row(pixels):
     return preprocess_image(pixels)
+
 
 def prepare_dataframe(csv_path, mode="train"):
     df = pd.read_csv(csv_path)
@@ -97,8 +249,6 @@ def prepare_dataframe(csv_path, mode="train"):
     # df['face'] = df['pixels'].apply(preprocess_image)
     df = df.dropna(subset=['face'])
     return df[['emotion', 'face']]
-
-
 
 
 class FER2013(Dataset):

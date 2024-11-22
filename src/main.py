@@ -223,7 +223,7 @@ def train_model(args):
 
         print(f'Epoch [{epoch + 1}/{num_epochs}], Evaluation Accuracy: {eval_accuracy:.2f}%')
 
-    insert_data_into_json("FER", "Raw_image_clahe", num_epochs, train_accuracies, eval_accuracies)
+    insert_data_into_json("FER", "Cropped_eyes_24_48_rotated", num_epochs, train_accuracies, eval_accuracies)
 
 
 def print_plots(dataset_name, num_epochs, name_prefix):
@@ -231,8 +231,8 @@ def print_plots(dataset_name, num_epochs, name_prefix):
 
 
 def main(args):
-    train_model(args)
-    # print_plots("FER", 100, "Raw_image")
+    # train_model(args)
+    print_plots("FER", 100, "Cropped_eyes")
 
 if __name__ == "__main__":
     parser = ArgumentParser()

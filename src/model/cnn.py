@@ -19,7 +19,7 @@ class EmotionCNN(nn.Module):
         self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1)
         self.bn3 = nn.BatchNorm2d(128)
 
-        conv_output_size = self._get_conv_output_size((3, 48, 48))  # Adjust based on actual input size  (3, 24, 48)
+        conv_output_size = self._get_conv_output_size((3, 24, 48))  # Adjust based on actual input size  (3, 24, 48)
         self.fc1 = nn.Linear(conv_output_size, 128)
         self.fc2 = nn.Linear(128, num_classes)
 
