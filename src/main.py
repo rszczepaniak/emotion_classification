@@ -6,7 +6,7 @@ import torch
 from scipy import io
 from torch import nn, optim
 from torch.utils.data import DataLoader
-from torchvision.transforms import transforms, RandomHorizontalFlip
+from torchvision.transforms import transforms
 
 from face_frontalization import frontalize, facial_feature_detector, camera_calibration
 from src.ArgumentParser import ArgumentParser
@@ -231,8 +231,9 @@ def print_plots(dataset_name, num_epochs, name_prefix):
 
 
 def main(args):
-    # train_model(args)
-    print_plots("FER", 100, "Cropped_eyes")
+    train_model(args)
+    # print_plots("FER", 100, "Raw_image")
+
 
 if __name__ == "__main__":
     parser = ArgumentParser()

@@ -14,12 +14,12 @@ class LandmarksDetectorIface:
 
 class dlibLandmarks(LandmarksDetectorIface):
     def __init__(self, root='data_unpacked'):
-        self.path = "shape_predictor_5_face_landmarks.dat"
-        self.path = os.path.join(root, self.path)
-        self.detector = dlib.shape_predictor(self.path)
+        self.path_5_landmarks = "shape_predictor_5_face_landmarks.dat"
+        self.path_68_landmarks = "shape_predictor_68_face_landmarks.dat"
+        self.detector = dlib.shape_predictor(os.path.join(root, self.path_68_landmarks))
 
     def convert_to_numpy(self, landmarks):
-        num_landmarks = 5
+        num_landmarks = 68
         coords = np.zeros((num_landmarks, 2), dtype=int)
         for i in range(num_landmarks):
             coords[i] = (landmarks.part(i).x, landmarks.part(i).y)

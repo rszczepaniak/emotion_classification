@@ -1,9 +1,7 @@
 import argparse
 import os
+from collections import Counter
 from functools import lru_cache
-from multiprocessing import Pool, cpu_count
-
-from absl import logging
 
 import cv2
 import dlib
@@ -12,9 +10,12 @@ import numpy as np
 import pandas as pd
 import torchvision.transforms.transforms as transforms
 from PIL import Image
+from matplotlib import pyplot as plt
+from scipy import io
 from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
 
+import face_frontalization.camera_calibration as calib
+from face_frontalization import frontalize
 from src.face_alignment import FaceAlignment
 from src.landmarks_detector import dlibLandmarks
 from src.utils import get_label_emotion, standerlization, normalize_dataset_mode_255, \
@@ -207,27 +208,85 @@ def crop_image_around_eyes(image, left_eye, right_eye):
     cropped_face = image[y_min:y_max, x_min:x_max]
     return cropped_face if cropped_face.size > 0 else None
 
+def visualize_ref_U_3D(ref_U):
+    x, y, z = ref_U[:, :, 0], ref_U[:, :, 1], ref_U[:, :, 2]
+
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Flatten the arrays for 3D scatter plotting
+    ax.scatter(x.flatten(), y.flatten(), z.flatten(), c=z.flatten(), cmap='viridis', s=1)
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('3D Visualization of ref_U')
+    plt.show()
+
+
+def visualize_ref_U_as_image(ref_U):
+    ref_U_normalized = (ref_U - ref_U.min()) / (ref_U.max() - ref_U.min())  # Normalize to [0, 1]
+    plt.imshow(ref_U_normalized)
+    plt.title('ref_U Visualized as an Image')
+    plt.axis('off')
+    plt.show()
+
+
+def filter_and_visualize_2d(ref_U):
+    # Simulate that channel 1 (Y) < 0 is set to zero for 2D visualization
+    y_channel = ref_U[:, :, 1]  # Assuming the second channel represents 'Y'
+    mask = np.ones_like(y_channel)  # Start with all ones (keep all values)
+    mask[y_channel < 0] = 0  # Set to zero where Y < 0
+
+    # Apply the mask to the original ref_U for visualization
+    filtered_ref_U = np.multiply(ref_U, mask[:, :, None])  # Apply along all channels
+    return np.sum(filtered_ref_U, axis=2)  # Reduce to 2D by summing across channels for visualization
+
+
+
+def frontalize_face(face):
+    model3D = frontalize.ThreeD_Model("face_frontalization/frontalization_models/model3Ddlib.mat", 'model_dlib')
+    model3D.ref_U[model3D.ref_U.any() < 0] = 0
+    # lmarks = np.array(detect_landmarks_with_mediapipe(face))
+    lmarks = detect_landmarks(face)
+    if len(face.shape) == 2:  # Grayscale (single-channel)
+        face = np.stack((face, face, face), axis=-1)
+    proj_matrix, camera_matrix, rmat, tvec = calib.estimate_camera(model3D, lmarks)
+    eyemask = np.asarray(io.loadmat('face_frontalization/frontalization_models/eyemask.mat')['eyemask'])
+    _frontal_raw, frontal_sym = frontalize.frontalize(face, proj_matrix, model3D.ref_U, eyemask)
+    return frontal_sym
+
+
+def crop_and_rotate_eyes(face):
+    landmarks = detect_landmarks_with_mediapipe(face)
+    if landmarks is None:
+        return None
+
+    left_eye, right_eye = get_mediapipe_eye_centers(landmarks)
+
+    angle = compute_rotation_angle(left_eye, right_eye)
+    face = rotate_image(face, angle, center=(face.shape[1] // 2, face.shape[0] // 2))
+    left_eye, right_eye = rotate_eye_centers(left_eye, right_eye, angle,
+                                             center=(face.shape[1] // 2, face.shape[0] // 2))
+
+    face = crop_image_around_eyes(face, left_eye, right_eye)
+    return face
+
 
 @lru_cache(maxsize=10000)
 def preprocess_image(pixels_str):
     try:
         face = convert_pixels_to_image(pixels_str)
-        face = resize_image(face, (300, 300))
-
-        landmarks = detect_landmarks_with_mediapipe(face)
-        if landmarks is None:
-            return None
-
-        left_eye, right_eye = get_mediapipe_eye_centers(landmarks)
-
-        angle = compute_rotation_angle(left_eye, right_eye)
-        face = rotate_image(face, angle, center=(face.shape[1] // 2, face.shape[0] // 2))
-        left_eye, right_eye = rotate_eye_centers(left_eye, right_eye, angle,
-                                                 center=(face.shape[1] // 2, face.shape[0] // 2))
-
-        face = crop_image_around_eyes(face, left_eye, right_eye)
+        face = resize_image(face, (320, 320))
+        cv2.imshow("face", face)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        face = frontalize_face(face)
+        cv2.imshow("frontalized", face)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
         if face is not None:
-            face = resize_image(face, (48, 24))
+            face = resize_image(face, (48, 48))  # 48, 24
         return face
     except Exception as e:
         print(f"SOMETHING WENT WRONG: {e}")
@@ -243,10 +302,10 @@ def prepare_dataframe(csv_path, mode="train"):
     mode_map = {'train': 'Training', 'val': 'PrivateTest', 'test': 'PublicTest'}
     df = df[df['Usage'] == mode_map[mode]]
 
-    with Pool(cpu_count()) as pool:
-        df['face'] = list(tqdm(pool.imap(process_row, df['pixels']), total=len(df['pixels'])))
+    # with Pool(cpu_count()) as pool:
+    #     df['face'] = list(tqdm(pool.imap(process_row, df['pixels']), total=len(df['pixels'])))
 
-    # df['face'] = df['pixels'].apply(preprocess_image)
+    df['face'] = df['pixels'].apply(preprocess_image)
     df = df.dropna(subset=['face'])
     return df[['emotion', 'face']]
 
