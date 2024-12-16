@@ -6,7 +6,6 @@ Description: utils functions
 """
 import cv2
 import numpy as np
-# import seaborn as sn
 from torchvision.transforms.transforms import RandomHorizontalFlip, Compose
 from torchvision.transforms.transforms import ToTensor, ToPILImage
 
@@ -48,42 +47,48 @@ def tensor_to_numpy(image):
 
 
 def histogram_equalization(image):
-    # Check if the image is already in grayscale
-    if len(image.shape) == 3:
-        # Convert to grayscale if image is in color
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        # If already grayscale, use the image as is
-        gray_image = image
+    """
+    Applies histogram equalization to each channel of an RGB image or directly to a grayscale image.
 
-    # Apply histogram equalization
-    equalized_gray = cv2.equalizeHist(gray_image)
+    Parameters:
+        image (numpy.ndarray): Input image, can be grayscale or RGB.
 
-    # If the original image was color, replicate the grayscale equalized channel to 3 channels
-    if len(image.shape) == 3:
-        equalized_image = cv2.cvtColor(equalized_gray, cv2.COLOR_GRAY2BGR)
-    else:
-        # If the original image was grayscale, return the equalized grayscale image
-        equalized_image = equalized_gray
-
+    Returns:
+        numpy.ndarray: Image after histogram equalization.
+    """
+    # Check if the image is grayscale or RGB
+    if len(image.shape) == 3:  # RGB image
+        equalized_image = cv2.merge([cv2.equalizeHist(channel) for channel in cv2.split(image)])
+    else:  # Grayscale image
+        equalized_image = cv2.equalizeHist(image)
     return equalized_image
 
 
-
 def apply_clahe(image):
-    # Check if the image is already in grayscale (2D array)
-    if len(image.shape) == 3:
-        # Convert to grayscale if image is in color (3D array)
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        # If already grayscale, use the image as is
-        gray_image = image
+    """
+    Applies CLAHE (Contrast Limited Adaptive Histogram Equalization) to each channel of an RGB image or
+    directly to a grayscale image.
 
+    Parameters:
+        image (numpy.ndarray): Input image, can be grayscale or RGB.
+
+    Returns:
+        numpy.ndarray: Image after CLAHE.
+    """
     # Create CLAHE object with a clip limit and tile grid size
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-    # Apply CLAHE to the grayscale image
-    clahe_image = clahe.apply(gray_image)
+    # Check if the image is grayscale or RGB
+    if len(image.shape) == 3:  # RGB image
+        # Split the image into its R, G, B channels
+        channels = cv2.split(image)
+        # Apply CLAHE to each channel
+        clahe_channels = [clahe.apply(channel) for channel in channels]
+        # Merge the channels back into an RGB image
+        clahe_image = cv2.merge(clahe_channels)
+    else:  # Grayscale image
+        # Apply CLAHE directly
+        clahe_image = clahe.apply(image)
 
     return clahe_image
 
@@ -118,52 +123,6 @@ def histogram_stretching(image):
     return stretched_image
 
 
-def gamma_correction(image, gamma=1.0):
-    # Normalize the image to range [0, 1]
-    image_normalized = image / 255.0
-
-    # Apply gamma correction
-    corrected_image = np.power(image_normalized, gamma)
-
-    # Rescale back to the range [0, 255]
-    corrected_image = np.clip(corrected_image * 255, 0, 255)
-
-    return np.uint8(corrected_image)
-
-
-def z_score_normalization(image):
-    # Convert to float32 for the calculations
-    image_float = image.astype(np.float32)
-
-    # Compute the mean and standard deviation
-    mean = np.mean(image_float)
-    std = np.std(image_float)
-
-    # Apply Z-score normalization
-    normalized_image = (image_float - mean) / std
-
-    # Rescale the image to the range 0-255 and convert to uint8
-    normalized_image = np.clip(
-        (normalized_image - np.min(normalized_image)) * 255 / (np.max(normalized_image) - np.min(normalized_image)), 0,
-        255)
-
-    return np.uint8(normalized_image)
-
-
-def apply_canny(image):
-    # Convert to grayscale if it's in color
-    gray_image = image[:, :, 0]  # Grayscale, so all channels are identical
-    gray_image = np.clip(gray_image * 255, 0, 255).astype(np.uint8)  # Rescale to 0-255 and convert to uint8
-
-    # Ensure it's in uint8
-    gray_image = np.clip(gray_image, 0, 255).astype(np.uint8)
-
-    # Apply Canny edge detection
-    edges = cv2.Canny(gray_image, 100, 200)
-
-    return edges
-
-
 def gaussian_blur(image, kernel_size=(5, 5)):
     # Ensure the image is in uint8 format
     image = np.clip(image, 0, 255).astype(np.uint8)
@@ -175,24 +134,26 @@ def gaussian_blur(image, kernel_size=(5, 5)):
 
 
 def normalization(face):
-    face = tensor_to_numpy(face)
-    # [-1,1] range
-    # face = np.clip(face, 0, 255).astype(np.float32)
-    mean = np.mean(face)
-    std = np.std(face)
+    """
+    Normalizes a grayscale or RGB image. Converts the pixel range to [0, 255] after normalization.
 
-    # if black_image
-    # if int(mean) == 0 and int(std) == 0:
-    #     return face
+    Parameters:
+        face (numpy.ndarray): Input image, either grayscale or RGB.
 
-    face = (face - mean) / std
-    face = face.astype(np.float32)
-    # print(f'mean = {mean}, std={std}')
-    # normalization will change mean/std but will have overflow in max/min values
-    face = np.clip(face, -1, 1)
-    # convert from [-1,1] range to [0,1]
-    face = (face + 1) / 2
-    # face = (face * 255).astype(np.uint8)
+    Returns:
+        numpy.ndarray: Normalized image with pixel values in the range [0, 255].
+    """
+    face = tensor_to_numpy(face)  # Ensure the input is a numpy array
+
+    # Handle black images or near-zero standard deviation
+    epsilon = 1e-6  # Small value to avoid division by zero
+
+    if len(face.shape) == 3:  # RGB image
+        # Normalize each channel independently
+        face = cv2.merge([(np.clip((channel - np.mean(channel)) / max(np.std(channel), epsilon), -1, 1) + 1) / 2 for channel in cv2.split(face)])
+    else:  # Grayscale image
+        face = (np.clip((face - np.mean(face)) / max(np.std(face), epsilon), -1, 1) + 1) / 2  # Scale to [0, 1]
+
     return face.astype(np.float32)
 
 

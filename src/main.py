@@ -1,21 +1,28 @@
+import gc
+import gc
+import json
 import os
+import random
+import time
+from collections import defaultdict
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 from scipy import io
+from sklearn.model_selection import train_test_split
 from torch import nn, optim
 from torch.utils.data import DataLoader
-from torchvision.transforms import transforms
+from torchvision import models
+from torchvision.models import VGG16_Weights
 
 from face_frontalization import frontalize, facial_feature_detector, camera_calibration
-from src.ArgumentParser import ArgumentParser
 from src.configuration import IMAGES_DIR, UNPACKED_DATA_DIR, FDDB_IMAGE_DATASET, FDDB_DATASET_FILE_NAME
-from src.datasets.fer_dataset import create_train_dataloader, FER2013
+from src.datasets.datasets import create_train_dataloader, RAFD, prepare_dataframe
 from src.face_detector.face_detector import HaarCascadeDetector, DnnDetector
-from src.model.cnn import EmotionCNN
 from src.parsing_data import get_images_data
-from src.plot import insert_data_into_json, plot_all_models
+from src.plot import insert_data_into_json, plot_emotion_accuracies, plot_heatmaps
 
 
 def get_current_image_index() -> int:
@@ -150,93 +157,266 @@ def display_tensor_with_opencv(tensor_image):
     cv2.destroyAllWindows()
 
 
-def train_model(args):
+def split_indexes_randomly(indexes, ratio=0.9, seed=42):
+    """
+    Splits a list of indexes into two random subsets: one with a specified ratio and the other with the complement.
+    """
+    # Shuffle the indexes to ensure randomness
+    if seed is not None:
+        random.seed(seed)  # Set the random seed for reproducibility
+    random.shuffle(indexes)
+
+    # Determine the split point
+    split_point = int(ratio * len(indexes))
+
+    # Split into two subsets
+    first_subset = indexes[:split_point]
+    second_subset = indexes[split_point:]
+
+    return first_subset, second_subset
+
+
+def test_model(model_name):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # print(f"device: {device}")
 
-    # Ensure model and data are on the same device
-    model = EmotionCNN(num_classes=7).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    model = models.vgg16(weights=None)
+    num_classes = 8  # Replace with the number of emotion classes
+    model.classifier = nn.Sequential(
+        nn.Linear(25088, 512),  # First new fully connected layer
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(512, 256),  # Second new fully connected layer
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(256, num_classes),  # Output layer
+        nn.Softmax(dim=1)  # For multi-class classification
+    )
+    model.load_state_dict(torch.load(f"emotion_classification_model_{model_name}.pth"))
+    model = model.to(device)
+    model.eval()
 
-    # Transformations for input data
-    transform = transforms.Compose([
-        transforms.Grayscale(num_output_channels=3),
-        transforms.ToTensor()
-    ])
+    # Store detailed classification results
+    overall_eval_accuracies = defaultdict(lambda: defaultdict(int))  # Nested dictionary
 
-    # Prepare datasets and loaders
-    train_dataset = FER2013("data_unpacked", mode='train', transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+    for chunk_idx, chunk in enumerate(pd.read_csv("data_unpacked/rafd.csv", chunksize=536), 1):
+        dataset = RAFD(prepare_dataframe(chunk))
+        print("Processing chunk {}/15".format(chunk_idx))
+        _, eval_dataset = train_test_split(dataset, test_size=0.10, random_state=42)
 
-    eval_dataset = FER2013("data_unpacked", mode='val', transform=transform)
-    eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
-
-    num_epochs = 100
-    train_losses, train_accuracies, eval_accuracies = [], [], []
-
-    # Training loop
-    for epoch in range(num_epochs):
-        model.train()
-        running_loss, correct_predictions, total_predictions = 0.0, 0, 0
-
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-
-            optimizer.zero_grad()
-            outputs = model(inputs)
-
-            loss = criterion(outputs, labels)
-
-            loss.backward()
-            optimizer.step()
-
-            _, predicted = torch.max(outputs.data, 1)
-            correct_predictions += (predicted == labels).sum().item()
-            total_predictions += labels.size(0)
-            running_loss += loss.item()
-
-        # Training metrics
-        epoch_accuracy = 100 * correct_predictions / total_predictions
-        train_losses.append(running_loss / len(train_loader))
-        train_accuracies.append(epoch_accuracy)
-
-        print(
-            f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(train_loader):.4f}, Accuracy: {epoch_accuracy:.2f}%')
-
-        # Evaluation
-        model.eval()
-        eval_correct_predictions, eval_total_predictions = 0, 0
+        eval_loader = DataLoader(eval_dataset, batch_size=4, shuffle=False, pin_memory=False, num_workers=4)
 
         with torch.no_grad():
             for inputs, labels in eval_loader:
+                inputs = inputs.permute(0, 3, 1, 2)
                 inputs, labels = inputs.to(device), labels.to(device)
 
                 outputs = model(inputs)
                 _, predicted = torch.max(outputs.data, 1)
-                eval_correct_predictions += (predicted == labels).sum().item()
-                eval_total_predictions += labels.size(0)
 
-        # Evaluation metrics
-        eval_accuracy = 100 * eval_correct_predictions / eval_total_predictions
-        eval_accuracies.append(eval_accuracy)
+                # Update classification results
+                for actual, pred in zip(labels, predicted):
+                    actual = actual.item()
+                    pred = pred.item()
+                    overall_eval_accuracies[actual][pred] += 1
 
-        print(f'Epoch [{epoch + 1}/{num_epochs}], Evaluation Accuracy: {eval_accuracy:.2f}%')
+        del eval_loader, eval_dataset, dataset, chunk
+        torch.cuda.empty_cache()
 
-    insert_data_into_json("FER", "Cropped_eyes_24_48_rotated", num_epochs, train_accuracies, eval_accuracies)
+    # Save the results in a JSON file
+    with open("validation_results.json", 'r') as fh:
+        data = json.load(fh)
+
+    data.append({
+        "model_name": model_name.capitalize(),
+        "results": {k: dict(v) for k, v in overall_eval_accuracies.items()}  # Convert defaultdict to dict
+    })
+
+    with open("validation_results.json", "w") as json_file:
+        json.dump(data, json_file, indent=4)
 
 
-def print_plots(dataset_name, num_epochs, name_prefix):
-    plot_all_models(dataset_name, num_epochs, name_prefix)
+def train_model():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # print(f"device: {device}")
+
+    # model = EmotionCNN(num_classes=7).to(device)
+    # criterion = nn.CrossEntropyLoss()
+    # optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    model = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
+
+    # Freeze the feature extraction layers
+    for param in model.features.parameters():
+        param.requires_grad = False
+
+    # Modify the classifier
+    num_classes = 8  # Replace with the number of emotion classes
+    model.classifier = nn.Sequential(
+        nn.Linear(25088, 512),  # First new fully connected layer
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(512, 256),  # Second new fully connected layer
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(256, num_classes),  # Output layer
+        nn.Softmax(dim=1)  # For multi-class classification
+    )
+    # model.load_state_dict(torch.load("emotion_classification_model.pth"))
+    model = model.to(device)
+
+    # Define loss function and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.classifier.parameters(), lr=0.0001)
+
+    # Transformations for input data
+    # transform = transforms.Compose([
+    #     # transforms.Grayscale(num_output_channels=3),
+    #     transforms.ToTensor()
+    # ])
+
+    # Prepare datasets and loaders
+    # train_dataset = FER2013("data_unpacked", mode='train', transform=transform)
+    # train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+
+    # eval_dataset = FER2013("data_unpacked", mode='val', transform=transform)
+    # eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    num_epochs = 20
+    num_chunks = 15
+    overall_train_accuracies = {chunk_id: [] for chunk_id in range(num_chunks)}
+    overall_eval_accuracies = {chunk_id: [] for chunk_id in range(num_chunks)}
+
+    start_time = time.time()
+    for chunk_idx, chunk in enumerate(pd.read_csv("data_unpacked/rafd.csv", chunksize=536), 1):
+        dataset = RAFD(prepare_dataframe(chunk))
+        train_dataset, eval_dataset = train_test_split(dataset, test_size=0.10, random_state=42)
+        # skip_for_eval, skip_for_train = split_indexes_randomly(list(range(len(os.listdir("data_unpacked/rafd/")))))
+        # train_dataset = RAFD_DYNAMIC(skip_for_eval)
+        # eval_dataset = RAFD_DYNAMIC(skip_for_train)
+        train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, pin_memory=False, num_workers=4)
+
+        eval_loader = DataLoader(eval_dataset, batch_size=4, shuffle=False, pin_memory=False, num_workers=4)
+
+        # Training loop
+        for epoch in range(num_epochs):
+            model.train()
+            train_correct_per_class = np.zeros(num_classes)
+            train_total_per_class = np.zeros(num_classes)
+
+            for inputs, labels in train_loader:
+                inputs = inputs.permute(0, 3, 1, 2)  # From [batch_size, height, width, channels] to [batch_size, channels, height, width]
+
+                inputs, labels = inputs.to(device), labels.to(device)
+
+                optimizer.zero_grad()
+                outputs = model(inputs)
+
+                loss = criterion(outputs, labels)
+
+                loss.backward()
+                optimizer.step()
+
+                _, predicted = torch.max(outputs.data, 1)
+
+                for i in range(num_classes):
+                    train_correct_per_class[i] += ((predicted == i) & (labels == i)).sum().item()
+                    train_total_per_class[i] += (labels == i).sum().item()
+
+            accuracies = []
+            for i in range(num_classes):
+                accuracies.append(
+                    100 * train_correct_per_class[i] / train_total_per_class[i] if train_total_per_class[i] > 0 else 0)
+            overall_train_accuracies[chunk_idx - 1].append(accuracies) 
+
+            print(
+                f"Chunk: {chunk_idx}/{num_chunks}, Epoch [{epoch + 1}/{num_epochs}], Train Accuracies Per Class: {overall_train_accuracies[chunk_idx - 1][epoch]}")
+
+            # Evaluation
+            model.eval()
+            eval_correct_per_class = np.zeros(num_classes)
+            eval_total_per_class = np.zeros(num_classes)
+
+            with torch.no_grad():
+                for inputs, labels in eval_loader:
+                    inputs = inputs.permute(0, 3, 1, 2)
+                    inputs, labels = inputs.to(device), labels.to(device)
+
+                    outputs = model(inputs)
+                    _, predicted = torch.max(outputs.data, 1)
+                    for i in range(num_classes):
+                        eval_correct_per_class[i] += ((predicted == i) & (labels == i)).sum().item()
+                        eval_total_per_class[i] += (labels == i).sum().item()
+
+                # Calculate mean accuracies for this epoch
+            accuracies = []
+            for i in range(num_classes):
+                accuracies.append(
+                    100 * eval_correct_per_class[i] / eval_total_per_class[i] if eval_total_per_class[i] > 0 else 0)
+            overall_eval_accuracies[chunk_idx - 1].append(accuracies)
+
+            print(
+                f"Epoch [{epoch + 1}/{num_epochs}], Eval Accuracies Per Class: {overall_eval_accuracies[chunk_idx - 1][epoch]}")
+        train_loader = None
+        eval_loader = None
+        train_loader = None
+        eval_loader = None
+        dataset = None
+        chunk = None
+        del train_loader, eval_loader, train_dataset, eval_dataset, dataset, chunk
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    time_of_training = time.time() - start_time
+    torch.save(model.state_dict(), "emotion_classification_model_raw_image_no_norm.pth")
+    insert_data_into_json("RAFD", "Raw_image_no_norm", num_epochs, overall_train_accuracies, overall_eval_accuracies,
+                          time_of_training)
 
 
-def main(args):
-    train_model(args)
-    # print_plots("FER", 100, "Raw_image")
+def print_names(dataset_name):
+    with open("models_training_results.json", "r") as json_file:
+        data = json.load(json_file)
+    names = [x["name"] for x in data if x["dataset_name"] == dataset_name]
+    return set(names)
+
+
+def print_accuracy_per_emotion(model_name):
+    emotion_map = {
+        "happy": 0,
+        "angry": 1,
+        "sad": 2,
+        "contemptuous": 3,
+        "disgusted": 4,
+        "neutral": 5,
+        "fearful": 6,
+        "surprised": 7
+    }
+
+    with open("validation_results.json", "r") as json_file:
+        data = json.load(json_file)
+
+    found = None
+    for d in data:
+        if d["model_name"] == model_name:
+            found = d
+    if found is None:
+        return
+
+    for idx, emotion in enumerate(emotion_map.keys(), 0):
+        print(f'{emotion}: {found["results"][str(idx)][0]/found["results"][str(idx)][1]*100:.2f}%')
+
+
+def main():
+    # train_model()
+    # for model_name in ["raw_image", "crop_eyes", "crop_face", "frontalized", "raw_image_hist_eq"]:
+    test_model("raw_image_no_norm")
+    # print_accuracy_per_emotion("crop_face")
+    # plot_emotion_accuracies("RAFD", 20, "Frontalized", 8, False, True)
+    # plot_heatmaps("Raw_image")
+    # plot_emotion_first_last_chunks("RAFD", 20, "Raw_image", 8, False, False)
+    # plot_single_model("RAFD", 20, "Raw_image_hist_eq")
+    # plot_all_models("RAFD", 20, name_prefixes=[], exact_names=[], filters=[])#, exact_names=["Raw_image", "Cropped_eyes_24_48", "Cropped_eyes_24_48_rotated", "Frontalized"])
+    # print(print_names("FER"))
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
-    arguments = parser.parse()
-    main(arguments)
+    main()
     pass
