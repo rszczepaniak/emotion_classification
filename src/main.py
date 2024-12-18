@@ -11,16 +11,21 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy import io
+from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import models
 from torchvision.models import VGG16_Weights
+from tqdm import tqdm
 
 from face_frontalization import frontalize, facial_feature_detector, camera_calibration
 from src.configuration import IMAGES_DIR, UNPACKED_DATA_DIR, FDDB_IMAGE_DATASET, FDDB_DATASET_FILE_NAME
-from src.datasets.datasets import create_train_dataloader, RAFD, prepare_dataframe
+from src.datasets.datasets import create_train_dataloader, RAFD, prepare_dataframe, preprocess_image
 from src.face_detector.face_detector import HaarCascadeDetector, DnnDetector
+from src.model.feature_extraction import build_gabor_kernels, apply_gabor_filters, extract_lbp_features, \
+    euclidean_distance
 from src.parsing_data import get_images_data
 from src.plot import insert_data_into_json, plot_emotion_accuracies, plot_heatmaps
 
@@ -397,20 +402,116 @@ def print_accuracy_per_emotion(model_name):
     for d in data:
         if d["model_name"] == model_name:
             found = d
+            break
     if found is None:
+        print(f"Model '{model_name}' not found.")
         return
 
-    for idx, emotion in enumerate(emotion_map.keys(), 0):
-        print(f'{emotion}: {found["results"][str(idx)][0]/found["results"][str(idx)][1]*100:.2f}%')
+    results = found["results"]
+    total_accuracies = []
+
+    # Calculate and print per-emotion accuracy
+    print(f"Per-Emotion Accuracy for model '{model_name}':")
+    for emotion, idx in emotion_map.items():
+        actual_total = sum(results[str(idx)].values())  # Total occurrences of the current emotion
+        correct_predictions = results[str(idx)].get(str(idx), 0)  # Correct predictions for this emotion
+
+        if actual_total > 0:
+            accuracy = correct_predictions / actual_total * 100
+        else:
+            accuracy = 0.0
+
+        total_accuracies.append(accuracy)
+        print(f'{emotion}: {accuracy:.2f}%')
+
+    # Calculate and print mean accuracy
+    mean_accuracy = np.mean(total_accuracies)
+    std_deviation = np.std(total_accuracies)
+
+    print(f'\nMean Accuracy: {mean_accuracy:.2f}%')
+    print(f'Accuracy Variation (Standard Deviation): {std_deviation:.2f}%')
+
+
+def train_svm(features_file):
+    data = np.load(features_file)
+    x = data['x']
+    y = data['y']
+
+    X_train, X_test, y_train, y_test = train_test_split(x, y, test_size=0.1, random_state=42)
+
+    # Create and train the SVM model
+    svm = SVC(kernel='linear', C=1)  # Linear kernel for simplicity
+    svm.fit(X_train, y_train)
+
+    y_pred = svm.predict(X_test)
+
+    print(classification_report(y_test, y_pred))
+
+
+def train_mdc(features_file, distance_metric):
+    data = np.load(features_file)
+    x = data['x']
+    y = data['y']
+
+    # Split data into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(x, y, test_size=0.1, random_state=42)
+
+    # Calculate class centroids
+    class_labels = np.unique(y_train)
+    centroids = {}
+    for label in class_labels:
+        centroids[label] = np.mean(X_train[y_train == label], axis=0)
+
+    covariance_matrix = np.cov(X_train, rowvar=False)
+    y_pred = []
+    for sample in X_test:
+        distances = {label: distance_metric(sample, centroid, covariance_matrix) for label, centroid in centroids.items()}
+        predicted_label = min(distances, key=distances.get)
+        y_pred.append(predicted_label)
+
+    print(classification_report(y_test, y_pred))
+
+
+
+def extract_features_to_file(file_name):
+    chunk_size = 1000
+    file_path = "data_unpacked/rafd_crop_face.csv"
+
+    x = []
+    y = []
+
+    kernels = build_gabor_kernels(ksize=31)
+
+    # Use tqdm to track progress for the chunks
+    total_rows = sum(1 for _ in open(file_path)) - 1  # Subtract 1 for header row
+    with tqdm(total=total_rows, desc="Processing rows") as pbar:
+        for chunk in pd.read_csv(file_path, dtype={"emotion": "str", "pixels": "float32"}, chunksize=chunk_size):
+            for _, row in chunk.iterrows():
+                face = preprocess_image(row["pixels"])  # Convert pixels to image
+                features = apply_gabor_filters(face, kernels)  # Apply Gabor filters
+                # features = extract_lbp_features(face)
+                x.append(features)
+                y.append(row['emotion'])  # Use the emotion label
+                pbar.update(1)  # Update the progress bar for each processed row
+
+    x = np.array(x)
+    y = np.array(y)
+
+    np.savez(file_name, x=x, y=y)
+
 
 
 def main():
+    extract_features_to_file("gabor_")
+    # train_svm()
+    # train_mdc(euclidean_distance) # mahalanobis_distance, chi_square_distance
     # train_model()
     # for model_name in ["raw_image", "crop_eyes", "crop_face", "frontalized", "raw_image_hist_eq"]:
-    test_model("raw_image_no_norm")
-    # print_accuracy_per_emotion("crop_face")
-    # plot_emotion_accuracies("RAFD", 20, "Frontalized", 8, False, True)
-    # plot_heatmaps("Raw_image")
+    # test_model("raw_image_no_norm")
+    # print_accuracy_per_emotion("Crop_face")
+    # for name in ["Raw_image", "Raw_image_no_norm", "Raw_image_hist_eq", "Raw_image_clahe", "Crop_face", "Crop_eyes", "Frontalized"]:
+    #     plot_emotion_accuracies("RAFD", 20, name, 8, False, True)
+    # plot_heatmaps("Raw_image_no_norm", "raw images without normalization")
     # plot_emotion_first_last_chunks("RAFD", 20, "Raw_image", 8, False, False)
     # plot_single_model("RAFD", 20, "Raw_image_hist_eq")
     # plot_all_models("RAFD", 20, name_prefixes=[], exact_names=[], filters=[])#, exact_names=["Raw_image", "Cropped_eyes_24_48", "Cropped_eyes_24_48_rotated", "Frontalized"])

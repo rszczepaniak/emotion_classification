@@ -192,7 +192,7 @@ def plot_emotion_accuracies(dataset_name: str, num_epochs: int, name: str, num_e
 
     # Subplot 2: Mean accuracy per batch
     plt.subplot(2, 1, 2)
-    plt.plot(list(range(len(mean_accuracy_per_batch))), mean_accuracy_per_batch, label="Mean accuracy per batch",
+    plt.plot(list(range(len(mean_accuracy_per_batch))), mean_accuracy_per_batch, label="Mean accuracy per chunk",
              color=colors[8 % len(colors)],
              linestyle='--', linewidth=2)
     plt.title("Mean Accuracy Per Chunk", fontsize=20)
@@ -215,10 +215,22 @@ def plot_emotion_accuracies(dataset_name: str, num_epochs: int, name: str, num_e
     plt.show()
 
 
-def plot_heatmaps(model_name):
+def plot_heatmaps(model_name, title):
+    emotion_map = {
+        0: "happy",
+        1: "angry",
+        2: "sad",
+        3: "contemptuous",
+        4: "disgusted",
+        5: "neutral",
+        6: "fearful",
+        7: "surprised"
+    }
+    # Load validation results
     with open("validation_results.json", "r") as json_file:
         data = json.load(json_file)
 
+    # Find the results for the specified model
     results = None
     for model in data:
         if model["model_name"] == model_name:
@@ -227,22 +239,32 @@ def plot_heatmaps(model_name):
         print(f"Model name: {model_name} not found")
         return
 
-    # Calculate accuracies
-    classes = sorted(results.keys(), key=int)  # Ensure sorted order of keys
-    accuracies = [results[class_idx][0] / results[class_idx][1] for class_idx in classes]
-
-    # Create a diagonal accuracy matrix
+    # Prepare confusion matrix from results
+    classes = sorted(results.keys(), key=int)  # Ensure sorted order of actual emotions
     num_classes = len(classes)
-    heatmap_data = np.zeros((num_classes, num_classes))
-    np.fill_diagonal(heatmap_data, accuracies)
+
+    # Create confusion matrix
+    confusion_matrix = np.zeros((num_classes, num_classes))
+    for actual in classes:
+        for predicted in results[actual]:
+            confusion_matrix[int(actual), int(predicted)] = results[actual][predicted]
+
+    # Normalize by row (actual class total) to calculate percentages
+    row_sums = confusion_matrix.sum(axis=1, keepdims=True)
+    normalized_matrix = confusion_matrix / row_sums
 
     # Plot heatmap
-    plt.figure(figsize=(8, 6))
+    plt.figure(figsize=(10, 8))
     sns.heatmap(
-        heatmap_data, annot=True, fmt=".2f", cmap="coolwarm",
-        xticklabels=classes, yticklabels=classes
+        normalized_matrix,
+        annot=True,
+        fmt=".2f",
+        cmap="coolwarm",
+        xticklabels=[emotion_map[int(c)] for c in classes],
+        yticklabels=[emotion_map[int(c)] for c in classes]
     )
-    plt.title(f'Classification Accuracy Heatmap for {model_name}')
+    plt.title(f'Confusion Matrix Heatmap for {title}')
     plt.xlabel("Predicted Class")
+    plt.xticks(rotation=45)
     plt.ylabel("Actual Class")
-    plt.show()
+    plt.savefig(f"heatmap_{model_name}.png", bbox_inches='tight')

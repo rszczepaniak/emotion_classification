@@ -261,7 +261,7 @@ def crop_middle_dynamic(image, crop_size):
     return cropped_image
 
 
-def preprocess_image(pixels_str, shape=(1024, 681), need_convert=True):
+def preprocess_image(pixels_str, shape=(320, 320), need_convert=True):
     try:
         if need_convert:
             face = convert_pixels_to_image(pixels_str, shape, True)
@@ -298,7 +298,7 @@ def preprocess_image(pixels_str, shape=(1024, 681), need_convert=True):
         # cv2.imshow("face", face)
         # cv2.waitKey(0)
         # cv2.destroyAllWindows()
-        # face_clahe = apply_clahe(face)
+        # face = apply_clahe(face)
         # face_eq = histogram_equalization(face)
         # face = None
         # del face
@@ -307,9 +307,9 @@ def preprocess_image(pixels_str, shape=(1024, 681), need_convert=True):
         # cv2.imshow("face", face)
         # cv2.waitKey(0)
         # cv2.destroyAllWindows()
-        # face_norm = normalization(face_clahe)
-        # face_eq = None
-        # del face_eq
+        # face_norm = normalization(face)
+        # face = None
+        # del face
         # gc.collect()
         # lmarks = detect_landmarks_with_mediapipe(face)
         # left_eye, right_eye = get_mediapipe_eye_centers(lmarks)
@@ -320,7 +320,7 @@ def preprocess_image(pixels_str, shape=(1024, 681), need_convert=True):
             # cv2.imshow("pre-processes", face)
             # cv2.waitKey(0)
             # cv2.destroyAllWindows()
-        return face.astype(np.float32)
+        return face
     except Exception as e:
         print(f"SOMETHING WENT WRONG: {e}")
         # raise Exception("koniec")
