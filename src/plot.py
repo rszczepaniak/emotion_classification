@@ -83,7 +83,7 @@ def plot_all_models(dataset_name: str, num_epochs: int, name_prefixes: list[str]
 
 
 def plot_emotion_accuracies(dataset_name: str, num_epochs: int, name: str, num_emotions: int = 8,
-                            plot_train: bool = True, save_plot: bool = False) -> None:
+                            plot_train: bool = True, save_plot: bool = False, plot_title="") -> None:
     """
     Plots train or eval accuracies for each emotion for the given dataset and model, averaged across all chunks.
 
@@ -150,14 +150,14 @@ def plot_emotion_accuracies(dataset_name: str, num_epochs: int, name: str, num_e
     # Subplot 1: Per-emotion accuracies
     plt.subplot(2, 1, 1)
     EMOTION_MAP = {
-        0: "happy",
-        1: "angry",
-        2: "sad",
-        3: "contemptuous",
-        4: "disgusted",
-        5: "neutral",
-        6: "fearful",
-        7: "surprised"
+        0: "szczęście",
+        1: "złość",
+        2: "smutek",
+        3: "pogarda",
+        4: "zniesmaczenie",
+        5: "neutralność",
+        6: "strach",
+        7: "zaskoczenie"
     }
 
     if plot_train:
@@ -178,13 +178,13 @@ def plot_emotion_accuracies(dataset_name: str, num_epochs: int, name: str, num_e
     # Plot styling for first subplot
     plot_type = "Training" if plot_train else "Evaluation"
     plt.title(
-        f"Per-Emotion {plot_type} Accuracy (Mean Across Chunks)",
+        plot_title,
         fontsize=20
     )
-    plt.xticks(epochs[::2])
-    plt.xlabel("Epoch", fontsize=15)
+    plt.xticks(epochs[::10]+[50])
+    plt.xlabel("Iteracje", fontsize=15)
     plt.yticks(range(0, 110, 10))
-    plt.ylabel("Accuracy (%)", fontsize=15)
+    plt.ylabel("Jakość klasyfikacji (%)", fontsize=15)
     plt.ylim(0, 100)
     plt.legend(fontsize=23, loc='upper left', bbox_to_anchor=(1, 1))
     plt.tick_params(axis='both', which='major', labelsize=20)
@@ -192,13 +192,13 @@ def plot_emotion_accuracies(dataset_name: str, num_epochs: int, name: str, num_e
 
     # Subplot 2: Mean accuracy per batch
     plt.subplot(2, 1, 2)
-    plt.plot(list(range(len(mean_accuracy_per_batch))), mean_accuracy_per_batch, label="Mean accuracy per chunk",
+    plt.plot(list(range(len(mean_accuracy_per_batch))), mean_accuracy_per_batch, label="Średnia jakość\nklasyfikacji dla serii",
              color=colors[8 % len(colors)],
              linestyle='--', linewidth=2)
-    plt.title("Mean Accuracy Per Chunk", fontsize=20)
+    plt.title("Średnia jakość klasyfikacji dla serii", fontsize=20)
     plt.xticks(list(range(15))[::2])
-    plt.xlabel("Chunk", fontsize=15)
-    plt.ylabel("Mean Accuracy (%)", fontsize=15)
+    plt.xlabel("Seria", fontsize=15)
+    plt.ylabel("Średnia jakość klasyfikacji (%)", fontsize=15)
     plt.yticks(range(0, 110, 10))
     plt.ylim(0, 100)
     plt.legend(fontsize=23, loc='upper left', bbox_to_anchor=(1, 1))
@@ -217,14 +217,14 @@ def plot_emotion_accuracies(dataset_name: str, num_epochs: int, name: str, num_e
 
 def plot_heatmaps(model_name, title):
     emotion_map = {
-        0: "happy",
-        1: "angry",
-        2: "sad",
-        3: "contemptuous",
-        4: "disgusted",
-        5: "neutral",
-        6: "fearful",
-        7: "surprised"
+        0: "szczęście",
+        1: "złość",
+        2: "smutek",
+        3: "pogarda",
+        4: "zniesmaczenie",
+        5: "neutralność",
+        6: "strach",
+        7: "zaskoczenie"
     }
     # Load validation results
     with open("validation_results.json", "r") as json_file:
@@ -263,8 +263,8 @@ def plot_heatmaps(model_name, title):
         xticklabels=[emotion_map[int(c)] for c in classes],
         yticklabels=[emotion_map[int(c)] for c in classes]
     )
-    plt.title(f'Confusion Matrix Heatmap for {title}')
-    plt.xlabel("Predicted Class")
+    plt.title(f'Mapa cieplna macierzy pomyłek dla {title}')
+    plt.xlabel("Przewidziana klasa")
     plt.xticks(rotation=45)
-    plt.ylabel("Actual Class")
+    plt.ylabel("Rzeczywista klasa")
     plt.savefig(f"heatmap_{model_name}.png", bbox_inches='tight')

@@ -1,8 +1,6 @@
 import argparse
 import gc
 import os
-import re
-from functools import lru_cache
 from multiprocessing import Pool, cpu_count
 
 import cv2
@@ -10,10 +8,8 @@ import dlib
 import numpy as np
 import torch
 import torchvision.transforms.transforms as transforms
-from PIL import Image
-from matplotlib import pyplot as plt
+from numpy.ma.core import shape
 from scipy import io
-from scipy.special.cython_special import spherical_jn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
@@ -21,10 +17,10 @@ import face_frontalization.camera_calibration as calib
 from face_frontalization import frontalize
 from src.datasets.parse_mp_to_dlib import convert_landmarks_mediapipe_to_dlib
 from src.face_alignment import FaceAlignment
-from src.face_detector.face_detector import DnnDetector, detect_landmarks_with_mediapipe, get_mediapipe_eye_centers
+from src.face_detector.face_detector import detect_landmarks_with_mediapipe, get_mediapipe_eye_centers
 from src.landmarks_detector import dlibLandmarks
 from src.utils import get_label_emotion, standerlization, normalize_dataset_mode_255, \
-    get_transforms, histogram_equalization, apply_clahe, normalization
+    get_transforms
 
 
 def detect_landmarks(face):
@@ -57,7 +53,7 @@ def convert_pixels_to_image(pixels_str, shape, rgb=True):
         np.ndarray: The reconstructed image as a numpy array.
     """
     # Convert the pixel string into a numpy array
-    pixels = np.fromstring(pixels_str, sep=' ').astype(np.uint8)
+    pixels = np.fromstring(pixels_str, sep=' ').astype(np.float32)
 
     if rgb:
         # Reshape into (Height, Width, 3) for RGB
@@ -122,7 +118,6 @@ def display_eye_centers(image, left_eye, right_eye):
     cv2.imshow('Eye Centers', output_image)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
 
 
 def compute_rotation_angle(left_eye, right_eye):
@@ -261,7 +256,7 @@ def crop_middle_dynamic(image, crop_size):
     return cropped_image
 
 
-def preprocess_image(pixels_str, shape=(320, 320), need_convert=True):
+def preprocess_image(pixels_str, shape=(320, 320), final_shape=(0, 0), need_convert=True):
     try:
         if need_convert:
             face = convert_pixels_to_image(pixels_str, shape, True)
@@ -269,58 +264,7 @@ def preprocess_image(pixels_str, shape=(320, 320), need_convert=True):
             gc.collect()
         else:
             face = pixels_str
-
-        # cv2.imwrite("face.jpg", face)
-
-        # idx = len(os.listdir("images"))
-        # cv2.imwrite(f"images/{idx}_orig_rafd.jpg", orig_face)
-        # face = change_background_to_black(face)
-        # face = DnnDetector().detect_faces(face)[0]
-        # face = resize_image(face, (320, 320))
-        # lmarks = detect_landmarks_with_mediapipe(face)
-        # left_eye, right_eye = get_mediapipe_eye_centers(lmarks)
-        # face = crop_image_around_eyes(face, left_eye, right_eye)
-        # cv2.imshow("face", face)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        # face = resize_image(face, (512, 340))
-        # cv2.imwrite("cropped_face.jpg", face)
-        # cv2.imshow("cropped", face)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        # cv2.imwrite(f"images/{idx}_crop_rafd.jpg", face)
-        # face = crop_and_rotate_eyes(face)
-        # face = frontalize_face(face)
-        # face = face[60:260, 60:260]
-        # face = resize_image(face, (320, 320))
-        # cv2.imwrite(f"images/{idx}_frontalized_rafd.jpg", front_face)
-        # save_images_side_by_side(f"images/_cropped_face.jpg", orig_face, face)
-        # cv2.imshow("face", face)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        # face = apply_clahe(face)
-        # face_eq = histogram_equalization(face)
-        # face = None
-        # del face
-        # gc.collect()
-        # cv2.imshow("origface", orig_face)
-        # cv2.imshow("face", face)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-        # face_norm = normalization(face)
-        # face = None
-        # del face
-        # gc.collect()
-        # lmarks = detect_landmarks_with_mediapipe(face)
-        # left_eye, right_eye = get_mediapipe_eye_centers(lmarks)
-        # face = crop_image_around_eyes(face, left_eye, right_eye)
-        #
-        # if face is not None:
-            # face = resize_image(face, (256, 170))  # 48, 24 \ 1024, 681
-            # cv2.imshow("pre-processes", face)
-            # cv2.waitKey(0)
-            # cv2.destroyAllWindows()
-        return face
+        return resize_image(face, final_shape)
     except Exception as e:
         print(f"SOMETHING WENT WRONG: {e}")
         # raise Exception("koniec")
@@ -340,13 +284,17 @@ def save_images_side_by_side(output_path, *images):
     print(f"Image saved successfully at: {output_path}")
 
 
-def process_row(pixels):
-    return preprocess_image(pixels)
+def process_row(args):
+    pixels, image_size = args
+    return preprocess_image(pixels, final_shape=image_size)
 
 
-def prepare_dataframe(df, mode="train"):
+def prepare_dataframe(df, image_size):
+    # Create a list of tuples (pixels, image_size) for pool.imap
+    tasks = [(pixels, image_size) for pixels in df['pixels']]
+
     with Pool(cpu_count()) as pool:
-        df['face'] = list(tqdm(pool.imap(process_row, df['pixels']), total=len(df['pixels'])))
+        df['face'] = list(tqdm(pool.imap(process_row, tasks), total=len(tasks)))
     # df['face'] = df['pixels'].apply(preprocess_image)
     # Drop NaN rows and reset index to compact memory
     df = df.dropna(subset=['face']).reset_index(drop=True)
@@ -424,41 +372,9 @@ class RAFD(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
-
-class RAFD_DYNAMIC(Dataset):
-    """
-    RAFD format:
-        emotion     pixels
-
-    emotion: label (from 0 - 7)
-    pixels: 1024x681 pixel value (uint8)
-    """
-    EMOTION_MAP = {
-        "happy": 0,
-        "angry": 1,
-        "sad": 2,
-        "contemptuous": 3,
-        "disgusted": 4,
-        "neutral": 5,
-        "fearful": 6,
-        "surprised": 7
-    }
-    def __init__(self, skip_indexes: list, transform=None):
-        self.transform = transform
-        self.paths = [f"data_unpacked/rafd/{file_name}" for idx, file_name in enumerate(os.listdir("data_unpacked/rafd"), 0) if idx not in skip_indexes]
-
-    def __getitem__(self, index: int):
-        path = self.paths[index]
-        face = cv2.imread(path)
-        face = preprocess_image(face, need_convert=False)
-        emotion = re.search(r'(happy|angry|sad|contemptuous|disgusted|neutral|fearful|surprised)', path).group(0)
-
-        if self.transform is not None:
-            face = self.transform(face)
-        return face, self.EMOTION_MAP[emotion]
-
-    def __len__(self) -> int:
-        return len(self.paths)
+    def __del__(self):
+        if hasattr(self, 'df'):
+            del self.df
 
 
 def create_train_dataloader(root='data_unpacked', batch_size=32):
